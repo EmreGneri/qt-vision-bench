@@ -62,6 +62,35 @@ void Pipeline::setConfig(const PipelineConfig& cfg) {
 void Pipeline::reset() {
     ensureBackgroundSubtractor();
     detections_.clear();
+    motionHistory_.release();
+}
+
+// Tek gecisli sonum + birlestirme.
+//
+// Yaptigi is: history[p] = max((history[p] * decay) >> 8, mask[p])
+//
+// Bu adim karsilastirmada bilerek el yazimi: NumPy ayni sonucu uretmek icin
+// once carpma, sonra kaydirma, sonra maksimum, sonra tip donusumu olmak uzere
+// goruntu uzerinde birkac kez gecmek zorunda. Buradaki dongu hepsini tek
+// geciste, ara tampon olmadan yapiyor. Farkin dilden geldigi yer burasi.
+void Pipeline::updateMotionHistory(const cv::Mat& mask) {
+    if (motionHistory_.size() != mask.size() || motionHistory_.type() != CV_8UC1) {
+        motionHistory_ = cv::Mat::zeros(mask.size(), CV_8UC1);
+    }
+
+    const int decay = cfg_.historyDecay;
+    const int rows = motionHistory_.rows;
+    const int cols = motionHistory_.cols;
+
+    for (int y = 0; y < rows; ++y) {
+        uchar* historyRow = motionHistory_.ptr<uchar>(y);
+        const uchar* maskRow = mask.ptr<uchar>(y);
+        for (int x = 0; x < cols; ++x) {
+            const int decayed = (historyRow[x] * decay) >> 8;
+            const int merged = (decayed > maskRow[x]) ? decayed : maskRow[x];
+            historyRow[x] = static_cast<uchar>(merged);
+        }
+    }
 }
 
 FrameStats Pipeline::process(const cv::Mat& input, cv::Mat& output) {
@@ -138,10 +167,23 @@ FrameStats Pipeline::process(const cv::Mat& input, cv::Mat& output) {
     stats.detectMs = msSince(tDetect);
     stats.detections = static_cast<int>(detections_.size());
 
+    // ---- Hareket izi -----------------------------------------------------
+    // Isinma bitmeden guncellenmiyor: o sirada maske tum kareyi hareket
+    // gosterdigi icin iz basta bembeyaz olurdu.
+    const bool historyActive = cfg_.useMotionHistory && cfg_.useMotionDetect &&
+                               (framesSinceReset_ > cfg_.warmupFrames) && !mask_.empty();
+    if (historyActive) {
+        const auto tHistory = Clock::now();
+        updateMotionHistory(mask_);
+        stats.historyMs = msSince(tHistory);
+    }
+
     // ---- Cikti goruntusu -------------------------------------------------
     // Olcumun disinda tutulmadi: arayuzun gosterdigi kare bu, maliyeti de
     // rapora dahil olmali. Python tarafi da ayni isi yapiyor.
-    if (wantEdges) {
+    if (cfg_.useMotionHistory && !motionHistory_.empty()) {
+        cv::cvtColor(motionHistory_, output, cv::COLOR_GRAY2BGR);
+    } else if (wantEdges) {
         cv::cvtColor(edges_, output, cv::COLOR_GRAY2BGR);
     } else if (work->channels() == 1) {
         cv::cvtColor(*work, output, cv::COLOR_GRAY2BGR);

@@ -33,6 +33,7 @@ struct BenchOptions {
     int maxFrames = 0;     // 0 = videonun tamami
     int warmupFrames = 10; // MOG2'nin arka plan modeli oturana kadarki kareler
     std::string jsonOut;   // bos = sadece stdout
+    bool motionHistory = false;  // el yazimi piksel dongusu olan adimi ac
 };
 
 void printUsage() {
@@ -45,6 +46,8 @@ void printUsage() {
         "  --frames <n>                stop after n measured frames (default: whole video)\n"
         "  --warmup <n>                frames skipped before measuring (default: 10)\n"
         "  --json <path>               also write the result as JSON to <path>\n"
+        "  --history                   enable the hand-written motion-history stage\n"
+        "                              (applies to both the GUI and --bench)\n"
         "  --help                      this text\n");
 }
 
@@ -80,10 +83,13 @@ int runBench(const BenchOptions& opt) {
         return 1;
     }
 
-    Pipeline pipeline;  // varsayilan ayarlar; Python tarafi da ayni varsayilanlari kullaniyor
+    // Varsayilan ayarlar; Python tarafi da ayni varsayilanlari kullaniyor
+    PipelineConfig config;
+    config.useMotionHistory = opt.motionHistory;
+    Pipeline pipeline(config);
     cv::Mat frame, processed;
 
-    std::vector<double> totalMs, preMs, detMs;
+    std::vector<double> totalMs, preMs, detMs, historyMs;
     long long detections = 0;
     int measured = 0;
     int seen = 0;
@@ -107,6 +113,7 @@ int runBench(const BenchOptions& opt) {
         totalMs.push_back(stats.totalMs);
         preMs.push_back(stats.preprocessMs);
         detMs.push_back(stats.detectMs);
+        historyMs.push_back(stats.historyMs);
         detections += stats.detections;
         ++measured;
 
@@ -148,6 +155,8 @@ int runBench(const BenchOptions& opt) {
         "  \"process_ms_max\": %.4f,\n"
         "  \"preprocess_ms_mean\": %.4f,\n"
         "  \"detect_ms_mean\": %.4f,\n"
+        "  \"history_ms_mean\": %.4f,\n"
+        "  \"motion_history\": %s,\n"
         "  \"processing_fps\": %.2f,\n"
         "  \"end_to_end_fps\": %.2f,\n"
         "  \"wall_seconds\": %.4f,\n"
@@ -161,7 +170,8 @@ int runBench(const BenchOptions& opt) {
         meanTotal, percentile(totalMs, 50.0), percentile(totalMs, 95.0),
         *std::min_element(totalMs.begin(), totalMs.end()),
         *std::max_element(totalMs.begin(), totalMs.end()),
-        mean(preMs), mean(detMs),
+        mean(preMs), mean(detMs), mean(historyMs),
+        opt.motionHistory ? "true" : "false",
         (meanTotal > 0.0) ? (1000.0 / meanTotal) : 0.0,
         (wallSeconds > 0.0) ? (static_cast<double>(measured) / wallSeconds) : 0.0,
         wallSeconds, detections, CV_VERSION, kCompilerName);
@@ -212,6 +222,8 @@ int main(int argc, char* argv[]) {
             opt.jsonOut = argv[++i];
         } else if (arg == "--video" && hasNext) {
             startupVideo = argv[++i];
+        } else if (arg == "--history") {
+            opt.motionHistory = true;
         }
     }
 
@@ -227,6 +239,7 @@ int main(int argc, char* argv[]) {
     qRegisterMetaType<PipelineConfig>("PipelineConfig");
 
     MainWindow window;
+    window.setMotionHistoryEnabled(opt.motionHistory);
     window.show();
 
     if (!startupVideo.empty()) {

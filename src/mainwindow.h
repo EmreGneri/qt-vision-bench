@@ -24,6 +24,10 @@ public:
     // kaydi icin: uygulama acilir acilmaz isleme baslasin.
     void openVideo(const QString& path);
 
+    // --history bayragi arayuz modunda da gecerli olsun diye. Kutuyu isaretlemek
+    // zaten onControlsChanged'i tetikliyor, ayrica ayar gondermeye gerek yok.
+    void setMotionHistoryEnabled(bool enabled);
+
 signals:
     // Bu sinyaller isci ipligindeki VideoWorker slotlarina bagli. Iplikler
     // farkli oldugu icin Qt baglantiyi otomatik olarak kuyruklu yapar.
@@ -75,6 +79,7 @@ private:
     QCheckBox* cannyCheck_ = nullptr;
     QCheckBox* motionCheck_ = nullptr;
     QCheckBox* boxesCheck_ = nullptr;
+    QCheckBox* historyCheck_ = nullptr;
     QSlider* blurKernelSlider_ = nullptr;
     QLabel* blurKernelValue_ = nullptr;
     QSlider* cannyLowSlider_ = nullptr;

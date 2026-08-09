@@ -25,6 +25,15 @@ struct PipelineConfig {
     // gorunur ve ekrani saran sahte bir kutu cizilir. Bu kadar kare boyunca
     // model beslenir ama tespit bildirilmez.
     int    warmupFrames     = 5;
+
+    // Hareket izi: her karede eski iz sonumlenir ve yeni maskeyle birlestirilir,
+    // boylece son saniyelerdeki hareketin yolu goruntude kaliyor.
+    //
+    // Bu adimin tek bir OpenCV cagrisi karsiligi yok; el yazimi piksel dongusu.
+    // Karsilastirmada bilerek var: hattin geri kalani kutuphane cagrilarindan
+    // ibaret oldugu icin dil farkini gostermiyordu.
+    bool   useMotionHistory = false;
+    int    historyDecay     = 240;  // (deger * decay) >> 8, yani ~0.94 sonum
 };
 
 // Tek bir karenin islenme suresi. Milisaniye cinsinden, steady_clock ile olculur.
@@ -32,6 +41,7 @@ struct FrameStats {
     double totalMs      = 0.0;
     double preprocessMs = 0.0;  // gri tonlama + bulanik + kenar
     double detectMs     = 0.0;  // arka plan cikarma + kontur + filtre
+    double historyMs    = 0.0;  // hareket izi (kapaliysa 0)
     int    detections   = 0;
 };
 
@@ -60,8 +70,12 @@ public:
 
     const std::vector<cv::Rect>& lastDetections() const { return detections_; }
 
+    // Hareket izi goruntusu (CV_8UC1). Adim kapaliysa bos.
+    const cv::Mat& motionHistory() const { return motionHistory_; }
+
 private:
     void ensureBackgroundSubtractor();
+    void updateMotionHistory(const cv::Mat& mask);
 
     PipelineConfig cfg_;
     cv::Ptr<cv::BackgroundSubtractorMOG2> bgSub_;
@@ -69,7 +83,7 @@ private:
     int framesSinceReset_ = 0;
 
     // yeniden kullanilan ara tamponlar
-    cv::Mat gray_, blurred_, edges_, mask_, morphKernel_;
+    cv::Mat gray_, blurred_, edges_, mask_, morphKernel_, motionHistory_;
 };
 
 // Cift sayi veya sifir gelirse GaussianBlur patlar; disaridan gelen degeri

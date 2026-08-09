@@ -35,6 +35,7 @@ MOG2_VAR_THRESHOLD = 16.0
 MOG2_HISTORY = 500
 DRAW_BOXES = True
 PIPELINE_WARMUP_FRAMES = 5   # hattin kendi isinmasi (C++ tarafiyla ayni)
+HISTORY_DECAY = 240          # (deger * decay) >> 8, C++ tarafiyla birebir ayni
 
 DEFAULT_BENCH_WARMUP = 10    # olcume girmeyen kare sayisi
 
@@ -48,7 +49,7 @@ class Pipeline:
     geliyor" sorusunu olcerek ayirmak icin var.
     """
 
-    def __init__(self, preallocate=False):
+    def __init__(self, preallocate=False, motion_history=False):
         # detectShadows=False: C++ tarafi da golge tespitini kapatiyor
         self.bg_sub = cv2.createBackgroundSubtractorMOG2(
             history=MOG2_HISTORY,
@@ -68,9 +69,36 @@ class Pipeline:
         self._mask = None
         self._output = None
 
+        self.motion_history = motion_history
+        self._history = None
+        self._history_tmp = None
+
     def _dst(self, buffer):
         """preallocate acikken tamponu, kapaliyken None doner."""
         return buffer if self.preallocate else None
+
+    def _update_motion_history(self, mask):
+        """history = max((history * decay) >> 8, mask)
+
+        C++ tarafi bunu tek geciste, ara tampon olmadan yapiyor. NumPy'da ayni
+        sonuca ulasmanin yolu goruntu uzerinde birkac kez gecmek: carpma,
+        kaydirma, maksimum, geri yazma. Preallocate acikken en azindan ara
+        diziler yeniden ayrilmiyor, ama gecis sayisi yine de dortte kaliyor.
+        """
+        if self._history is None or self._history.shape != mask.shape:
+            self._history = np.zeros(mask.shape, dtype=np.uint8)
+            self._history_tmp = np.zeros(mask.shape, dtype=np.uint16)
+
+        if self.preallocate:
+            # np.uint16 carpan sart: NumPy 2'de uint8 * python int sonucu uint8
+            # kalir ve 255*240 tasar. Tipi acikca yukseltiyoruz.
+            np.multiply(self._history, np.uint16(HISTORY_DECAY), out=self._history_tmp)
+            np.right_shift(self._history_tmp, 8, out=self._history_tmp)
+            np.maximum(self._history_tmp, mask, out=self._history_tmp)
+            np.copyto(self._history, self._history_tmp, casting="unsafe")
+        else:
+            decayed = (self._history.astype(np.uint16) * np.uint16(HISTORY_DECAY)) >> 8
+            self._history = np.maximum(decayed, mask).astype(np.uint8)
 
     def process(self, frame):
         """Tek kareyi isler. (output_bgr, stats) doner. Sureler milisaniye."""
@@ -123,8 +151,24 @@ class Pipeline:
 
         t_detect = time.perf_counter()
 
+        # ---- hareket izi ----
+        # Isinma bitmeden guncellenmiyor: C++ tarafiyla ayni kosul.
+        history_active = (
+            self.motion_history
+            and USE_MOTION_DETECT
+            and self.frames_since_reset > PIPELINE_WARMUP_FRAMES
+            and self._mask is not None
+        )
+        if history_active:
+            self._update_motion_history(self._mask)
+
+        t_history = time.perf_counter()
+
         # ---- cikti goruntusu ----
-        if edges is not None:
+        if self.motion_history and self._history is not None:
+            output = cv2.cvtColor(self._history, cv2.COLOR_GRAY2BGR,
+                                  dst=self._dst(self._output))
+        elif edges is not None:
             output = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR, dst=self._dst(self._output))
         elif len(work.shape) == 2:
             output = cv2.cvtColor(work, cv2.COLOR_GRAY2BGR, dst=self._dst(self._output))
@@ -142,6 +186,7 @@ class Pipeline:
             "total_ms": (t_end - t_start) * 1000.0,
             "preprocess_ms": (t_preprocess - t_start) * 1000.0,
             "detect_ms": (t_detect - t_preprocess) * 1000.0,
+            "history_ms": (t_history - t_detect) * 1000.0 if history_active else 0.0,
             "detections": len(self.detections),
         }
         return output, stats
@@ -159,14 +204,15 @@ def percentile(values, p):
     return ordered[lo] * (1.0 - frac) + ordered[hi] * frac
 
 
-def run_bench(video_path, max_frames, warmup_frames, json_out, preallocate=False):
+def run_bench(video_path, max_frames, warmup_frames, json_out, preallocate=False,
+              motion_history=False):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"error: cannot open video: {video_path}", file=sys.stderr)
         return 1
 
-    pipeline = Pipeline(preallocate=preallocate)
-    total_ms, pre_ms, det_ms = [], [], []
+    pipeline = Pipeline(preallocate=preallocate, motion_history=motion_history)
+    total_ms, pre_ms, det_ms, hist_ms = [], [], [], []
     detections_total = 0
     seen = 0
     measured = 0
@@ -187,6 +233,7 @@ def run_bench(video_path, max_frames, warmup_frames, json_out, preallocate=False
         total_ms.append(stats["total_ms"])
         pre_ms.append(stats["preprocess_ms"])
         det_ms.append(stats["detect_ms"])
+        hist_ms.append(stats["history_ms"])
         detections_total += stats["detections"]
         measured += 1
 
@@ -220,6 +267,8 @@ def run_bench(video_path, max_frames, warmup_frames, json_out, preallocate=False
         "process_ms_max": round(max(total_ms), 4),
         "preprocess_ms_mean": round(statistics.fmean(pre_ms), 4),
         "detect_ms_mean": round(statistics.fmean(det_ms), 4),
+        "history_ms_mean": round(statistics.fmean(hist_ms), 4),
+        "motion_history": motion_history,
         "processing_fps": round(1000.0 / mean_total, 2) if mean_total > 0 else 0.0,
         "end_to_end_fps": round(measured / wall_seconds, 2) if wall_seconds > 0 else 0.0,
         "wall_seconds": round(wall_seconds, 4),
@@ -251,10 +300,12 @@ def main():
     parser.add_argument("--json", dest="json_out", default="")
     parser.add_argument("--preallocate", action="store_true",
                         help="reuse output buffers via dst= (mimics the C++ side)")
+    parser.add_argument("--history", action="store_true",
+                        help="enable the hand-written motion-history stage")
     args = parser.parse_args()
 
     return run_bench(args.bench, args.frames, args.warmup, args.json_out,
-                     preallocate=args.preallocate)
+                     preallocate=args.preallocate, motion_history=args.history)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,166 @@
+{
+  "repeat": 5,
+  "frames": 150,
+  "motion_history": true,
+  "rows": [
+    {
+      "label": "480p",
+      "pixels": 307200,
+      "cpp": {
+        "total_ms": 1.4411,
+        "total_min": 1.3972,
+        "total_max": 1.7101,
+        "pre_ms": 0.124,
+        "det_ms": 1.1474,
+        "hist_ms": 0.1197,
+        "detections": 274,
+        "runs_ms": [
+          1.4411,
+          1.4159,
+          1.7101,
+          1.4697,
+          1.3972
+        ]
+      },
+      "python": {
+        "total_ms": 2.3256,
+        "total_min": 2.2587,
+        "total_max": 2.4214,
+        "pre_ms": 0.1918,
+        "det_ms": 1.3056,
+        "hist_ms": 0.6462,
+        "detections": 274,
+        "runs_ms": [
+          2.4214,
+          2.2587,
+          2.3111,
+          2.3256,
+          2.3529
+        ]
+      },
+      "python_prealloc": {
+        "total_ms": 2.1888,
+        "total_min": 2.1723,
+        "total_max": 2.3306,
+        "pre_ms": 0.1475,
+        "det_ms": 1.2314,
+        "hist_ms": 0.7319,
+        "detections": 274,
+        "runs_ms": [
+          2.1888,
+          2.3306,
+          2.2365,
+          2.1723,
+          2.1745
+        ]
+      },
+      "parity_ok": true
+    },
+    {
+      "label": "720p",
+      "pixels": 921600,
+      "cpp": {
+        "total_ms": 4.0504,
+        "total_min": 4.0406,
+        "total_max": 4.1237,
+        "pre_ms": 0.2593,
+        "det_ms": 3.3265,
+        "hist_ms": 0.3213,
+        "detections": 270,
+        "runs_ms": [
+          4.1237,
+          4.0896,
+          4.0406,
+          4.0471,
+          4.0504
+        ]
+      },
+      "python": {
+        "total_ms": 7.1486,
+        "total_min": 7.0879,
+        "total_max": 7.4101,
+        "pre_ms": 0.3898,
+        "det_ms": 3.9011,
+        "hist_ms": 2.4554,
+        "detections": 270,
+        "runs_ms": [
+          7.1486,
+          7.4101,
+          7.0879,
+          7.2914,
+          7.0968
+        ]
+      },
+      "python_prealloc": {
+        "total_ms": 6.6597,
+        "total_min": 6.4424,
+        "total_max": 6.7536,
+        "pre_ms": 0.3002,
+        "det_ms": 3.7207,
+        "hist_ms": 2.3958,
+        "detections": 270,
+        "runs_ms": [
+          6.4424,
+          6.6597,
+          6.7301,
+          6.7536,
+          6.5609
+        ]
+      },
+      "parity_ok": true
+    },
+    {
+      "label": "1080p",
+      "pixels": 2073600,
+      "cpp": {
+        "total_ms": 11.0283,
+        "total_min": 10.9488,
+        "total_max": 11.1527,
+        "pre_ms": 0.5329,
+        "det_ms": 9.5131,
+        "hist_ms": 0.7898,
+        "detections": 271,
+        "runs_ms": [
+          11.0283,
+          11.1527,
+          10.9997,
+          11.0343,
+          10.9488
+        ]
+      },
+      "python": {
+        "total_ms": 16.1336,
+        "total_min": 16.0247,
+        "total_max": 16.2883,
+        "pre_ms": 1.35,
+        "det_ms": 9.144,
+        "hist_ms": 5.1135,
+        "detections": 271,
+        "runs_ms": [
+          16.0862,
+          16.0247,
+          16.1336,
+          16.2676,
+          16.2883
+        ]
+      },
+      "python_prealloc": {
+        "total_ms": 14.3651,
+        "total_min": 14.3274,
+        "total_max": 14.4448,
+        "pre_ms": 0.5201,
+        "det_ms": 8.8837,
+        "hist_ms": 4.6748,
+        "detections": 271,
+        "runs_ms": [
+          14.3274,
+          14.3492,
+          14.3651,
+          14.4448,
+          14.4141
+        ]
+      },
+      "parity_ok": true
+    }
+  ]
+}

@@ -99,6 +99,7 @@ def measure(command, env, repeat, label, name):
         "total_max": max(totals),
         "pre_ms": statistics.median([run["preprocess_ms_mean"] for run in runs]),
         "det_ms": statistics.median([run["detect_ms_mean"] for run in runs]),
+        "hist_ms": statistics.median([run.get("history_ms_mean", 0.0) for run in runs]),
         "detections": runs[0]["detections_total"],
         "runs_ms": totals,
     }
@@ -127,6 +128,11 @@ def build_markdown(rows, repeat, frames):
             f"{pre['total_ms'] / cpp['total_ms']:.2f}x | {parity} |"
         )
 
+    stages = [("pre_ms", "preprocess"), ("det_ms", "detection")]
+    # Hareket izi adimi kapaliyken satirlari sifirla doldurmanin anlami yok
+    if any(row["cpp"]["hist_ms"] > 0.0 for row in rows):
+        stages.append(("hist_ms", "motion history"))
+
     lines += [
         "",
         "Per-stage medians (ms):",
@@ -135,7 +141,7 @@ def build_markdown(rows, repeat, frames):
         "|---|---|---:|---:|---:|",
     ]
     for row in rows:
-        for stage_key, stage_name in (("pre_ms", "preprocess"), ("det_ms", "detection")):
+        for stage_key, stage_name in stages:
             lines.append(
                 f"| {row['label']} | {stage_name} | "
                 f"{row['cpp'][stage_key]:.3f} | {row['python'][stage_key]:.3f} | "
@@ -216,7 +222,15 @@ def main():
     parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP)
     parser.add_argument("--repeat", type=int, default=DEFAULT_REPEAT,
                         help="runs per cell; the median is reported")
+    parser.add_argument("--history", action="store_true",
+                        help="enable the hand-written motion-history stage in all variants")
     args = parser.parse_args()
+
+    # Iki mod ayri dosyalara yazar; biri digerini ezmesin
+    suffix = "_history" if args.history else ""
+    out_json = SWEEP_JSON.replace(".json", f"{suffix}.json")
+    out_md = SWEEP_MD.replace(".md", f"{suffix}.md")
+    out_png = SWEEP_PNG.replace(".png", f"{suffix}.png")
 
     if not os.path.isfile(args.exe):
         print(f"HATA: ikili yok: {args.exe}\n"
@@ -235,6 +249,8 @@ def main():
             return 1
 
         common = ["--bench", video, "--warmup", str(args.warmup)]
+        if args.history:
+            common = common + ["--history"]
 
         commands = {
             "cpp": [args.exe] + common,
@@ -257,17 +273,18 @@ def main():
         rows.append(row)
 
     markdown = build_markdown(rows, args.repeat, args.frames)
-    draw_chart(rows, SWEEP_PNG)
+    draw_chart(rows, out_png)
 
-    with open(SWEEP_JSON, "w", encoding="utf-8") as handle:
-        json.dump({"repeat": args.repeat, "frames": args.frames, "rows": rows},
+    with open(out_json, "w", encoding="utf-8") as handle:
+        json.dump({"repeat": args.repeat, "frames": args.frames,
+                   "motion_history": args.history, "rows": rows},
                   handle, indent=2)
-    with open(SWEEP_MD, "w", encoding="utf-8") as handle:
+    with open(out_md, "w", encoding="utf-8") as handle:
         handle.write(markdown + "\n")
 
     print()
     print(markdown)
-    print(f"\nWritten: {SWEEP_JSON}, {SWEEP_MD}, {SWEEP_PNG}")
+    print(f"\nWritten: {out_json}, {out_md}, {out_png}")
 
     mismatches = [row["label"] for row in rows if not row["parity_ok"]]
     if mismatches:

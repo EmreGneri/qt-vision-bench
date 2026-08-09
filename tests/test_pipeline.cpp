@@ -158,6 +158,52 @@ void testWarmupSuppressesDetections() {
     }
 }
 
+void testMotionHistoryDecays() {
+    section("motion history decays and merges");
+    PipelineConfig cfg;
+    cfg.useMotionHistory = true;
+    Pipeline pipeline(cfg);
+    cv::Mat output;
+
+    for (int i = 0; i < 60; ++i) {
+        pipeline.process(backgroundFrame(), output);
+    }
+
+    const cv::Rect object(120, 80, 120, 100);
+    const FrameStats withObject = pipeline.process(frameWithObject(object), output);
+
+    CHECK(withObject.historyMs > 0.0);
+    CHECK(!pipeline.motionHistory().empty());
+    CHECK(pipeline.motionHistory().type() == CV_8UC1);
+    CHECK(output.type() == CV_8UC3);
+
+    // Nesnenin merkezindeki iz, maske 255 oldugu icin tepe degerinde olmali
+    const cv::Point center(object.x + object.width / 2, object.y + object.height / 2);
+    const int peak = pipeline.motionHistory().at<uchar>(center);
+    CHECK(peak == 255);
+
+    // Nesne sahneden cikinca iz sonumlenmeli: azalmali ama aninda sifirlanmamali
+    pipeline.process(backgroundFrame(), output);
+    const int afterOneFrame = pipeline.motionHistory().at<uchar>(center);
+    CHECK(afterOneFrame < peak);
+    CHECK(afterOneFrame > 0);
+
+    // (255 * 240) >> 8 = 239; sonum formulu birebir bu olmali
+    CHECK(afterOneFrame == 239);
+}
+
+void testMotionHistoryOffCostsNothing() {
+    section("motion history off reports no history time");
+    Pipeline pipeline;  // varsayilan: kapali
+    cv::Mat output;
+
+    for (int i = 0; i < 20; ++i) {
+        const FrameStats stats = pipeline.process(backgroundFrame(), output);
+        CHECK(stats.historyMs == 0.0);
+    }
+    CHECK(pipeline.motionHistory().empty());
+}
+
 void testStatsAreConsistent() {
     section("timing fields are consistent");
     Pipeline pipeline;
@@ -182,6 +228,8 @@ int main() {
     testMinAreaFilter();
     testResetClearsBackground();
     testWarmupSuppressesDetections();
+    testMotionHistoryDecays();
+    testMotionHistoryOffCostsNothing();
     testStatsAreConsistent();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

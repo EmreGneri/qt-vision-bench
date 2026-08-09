@@ -137,6 +137,10 @@ QWidget* MainWindow::buildControlPanel() {
     cannyCheck_ = new QCheckBox(QStringLiteral("Canny edges"));
     motionCheck_ = new QCheckBox(QStringLiteral("Motion detection (MOG2)"));
     boxesCheck_ = new QCheckBox(QStringLiteral("Draw bounding boxes"));
+    historyCheck_ = new QCheckBox(QStringLiteral("Motion history trail"));
+    historyCheck_->setToolTip(
+        QStringLiteral("Hand-written per-pixel stage: decays the previous trail "
+                       "and merges the current mask in a single pass."));
 
     const PipelineConfig defaults;
     grayscaleCheck_->setChecked(defaults.useGrayscale);
@@ -144,8 +148,10 @@ QWidget* MainWindow::buildControlPanel() {
     cannyCheck_->setChecked(defaults.useCanny);
     motionCheck_->setChecked(defaults.useMotionDetect);
     boxesCheck_->setChecked(defaults.drawBoxes);
+    historyCheck_->setChecked(defaults.useMotionHistory);
 
-    for (QCheckBox* box : {grayscaleCheck_, blurCheck_, cannyCheck_, motionCheck_, boxesCheck_}) {
+    for (QCheckBox* box : {grayscaleCheck_, blurCheck_, cannyCheck_, motionCheck_,
+                           boxesCheck_, historyCheck_}) {
         stagesLayout->addWidget(box);
         connect(box, &QCheckBox::toggled, this, &MainWindow::onControlsChanged);
     }
@@ -218,6 +224,7 @@ PipelineConfig MainWindow::currentConfig() const {
     cfg.useMotionDetect = motionCheck_->isChecked();
     cfg.minContourArea = minAreaSpin_->value();
     cfg.drawBoxes = boxesCheck_->isChecked();
+    cfg.useMotionHistory = historyCheck_->isChecked();
     return cfg;
 }
 
@@ -254,6 +261,10 @@ void MainWindow::openVideo(const QString& path) {
     emit requestFile(path);
 }
 
+void MainWindow::setMotionHistoryEnabled(bool enabled) {
+    historyCheck_->setChecked(enabled);
+}
+
 void MainWindow::onFrameReady(const QImage& original, const QImage& processed,
                               FrameStats stats, double fps) {
     lastOriginal_ = original;
@@ -261,10 +272,16 @@ void MainWindow::onFrameReady(const QImage& original, const QImage& processed,
     updateImageLabels();
 
     fpsStatus_->setText(QStringLiteral("FPS: %1").arg(fps, 0, 'f', 1));
-    timingStatus_->setText(QStringLiteral("frame: %1 ms  (pre %2 / det %3)")
+    // Hareket izi kapaliyken sifir yazmanin anlami yok, alani da bosuna isgal eder
+    const QString historyPart =
+        (stats.historyMs > 0.0)
+            ? QStringLiteral(" / hist %1").arg(stats.historyMs, 0, 'f', 2)
+            : QString();
+    timingStatus_->setText(QStringLiteral("frame: %1 ms  (pre %2 / det %3%4)")
                                .arg(stats.totalMs, 0, 'f', 2)
                                .arg(stats.preprocessMs, 0, 'f', 2)
-                               .arg(stats.detectMs, 0, 'f', 2));
+                               .arg(stats.detectMs, 0, 'f', 2)
+                               .arg(historyPart));
     detectionStatus_->setText(QStringLiteral("detections: %1").arg(stats.detections));
 }
 
