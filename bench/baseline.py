@@ -1,15 +1,16 @@
-"""C++ hattinin Python karsiligi - karsilastirma icin referans uygulama.
+"""Python counterpart of the C++ pipeline - the reference implementation.
 
-Bu dosya src/pipeline.cpp'nin birebir aynisini yapar: ayni adimlar, ayni sira,
-ayni varsayilan parametreler, ayni isinma davranisi. Tek fark dil.
+This file does exactly what src/pipeline.cpp does: the same stages, in the same
+order, with the same defaults and the same warm-up behaviour. The language is
+the only difference.
 
-Olcum adil olsun diye:
-  - Ayni islem sirasi ve ayni OpenCV cagrilari kullanilir.
-  - Sure yalnizca isleme hattini kapsar, video cozme (decode) disaridadir.
-  - Ilk kareler (isinma) olcume girmez.
-  - Cikti JSON semasi C++ tarafiyla ayni.
+To keep the measurement fair:
+  - identical order of operations and identical OpenCV calls,
+  - timing covers the processing pipeline only, video decode is excluded,
+  - the first frames (warm-up) are not measured,
+  - the output JSON uses the same schema as the C++ side.
 
-Kullanim (PowerShell):
+Usage (PowerShell):
     py bench/baseline.py --bench bench/test_video.mp4 --json bench/result_python.json
 """
 
@@ -22,7 +23,7 @@ import time
 import cv2
 import numpy as np
 
-# ==== AYARLAR (C++ PipelineConfig varsayilanlariyla ayni olmali) ====
+# ==== SETTINGS (must match the C++ PipelineConfig defaults) ====
 USE_GRAYSCALE = True
 USE_BLUR = True
 BLUR_KERNEL = 5
@@ -34,23 +35,23 @@ MIN_CONTOUR_AREA = 500
 MOG2_VAR_THRESHOLD = 16.0
 MOG2_HISTORY = 500
 DRAW_BOXES = True
-PIPELINE_WARMUP_FRAMES = 5   # hattin kendi isinmasi (C++ tarafiyla ayni)
-HISTORY_DECAY = 240          # (deger * decay) >> 8, C++ tarafiyla birebir ayni
+PIPELINE_WARMUP_FRAMES = 5   # the pipeline's own warm-up, same as the C++ side
+HISTORY_DECAY = 240          # (value * decay) >> 8, identical to the C++ side
 
-DEFAULT_BENCH_WARMUP = 10    # olcume girmeyen kare sayisi
+DEFAULT_BENCH_WARMUP = 10    # frames excluded from the measurement
 
 
 class Pipeline:
-    """src/pipeline.h icindeki Pipeline sinifinin Python esdegeri.
+    """Python equivalent of the Pipeline class in src/pipeline.h.
 
-    preallocate=True verilirse her OpenCV cagrisina `dst=` ile ayni tampon
-    gecilir, yani C++ tarafinin uye cv::Mat'leri yeniden kullanmasi taklit
-    edilir. Bu, "fark yorumlayicidan mi yoksa kare basina NumPy tahsisinden mi
-    geliyor" sorusunu olcerek ayirmak icin var.
+    With preallocate=True every OpenCV call receives the same buffer through
+    `dst=`, mimicking the way the C++ side reuses its member cv::Mat objects.
+    That variant exists to separate one question by measurement: is the gap the
+    interpreter, or is it one fresh NumPy array per intermediate image per frame?
     """
 
     def __init__(self, preallocate=False, motion_history=False):
-        # detectShadows=False: C++ tarafi da golge tespitini kapatiyor
+        # detectShadows=False: the C++ side disables shadow detection too
         self.bg_sub = cv2.createBackgroundSubtractorMOG2(
             history=MOG2_HISTORY,
             varThreshold=MOG2_VAR_THRESHOLD,
@@ -61,8 +62,8 @@ class Pipeline:
         self.detections = []
 
         self.preallocate = preallocate
-        # Yeniden kullanilan tamponlar. preallocate kapaliyken hep None kalir,
-        # yani OpenCV her cagrida yeni dizi ayirir.
+        # Reused buffers. They stay None while preallocate is off, so OpenCV
+        # allocates a fresh array on every call.
         self._gray = None
         self._blurred = None
         self._edges = None
@@ -74,25 +75,33 @@ class Pipeline:
         self._history_tmp = None
 
     def _dst(self, buffer):
-        """preallocate acikken tamponu, kapaliyken None doner."""
+        """Returns the buffer while preallocate is on, otherwise None."""
         return buffer if self.preallocate else None
+
+    def motion_history_image(self):
+        """The trail image (uint8), or None while the stage never ran."""
+        return self._history
 
     def _update_motion_history(self, mask):
         """history = max((history * decay) >> 8, mask)
 
-        C++ tarafi bunu tek geciste, ara tampon olmadan yapiyor. NumPy'da ayni
-        sonuca ulasmanin yolu goruntu uzerinde birkac kez gecmek: carpma,
-        kaydirma, maksimum, geri yazma. Preallocate acikken en azindan ara
-        diziler yeniden ayrilmiyor, ama gecis sayisi yine de dortte kaliyor.
+        The C++ side does this in a single pass with no temporary image. Reaching
+        the same result in NumPy means traversing the image several times:
+        multiply, shift, maximum, write back. Preallocation at least keeps the
+        intermediate arrays from being reallocated, but the number of passes
+        stays at four.
         """
         if self._history is None or self._history.shape != mask.shape:
             self._history = np.zeros(mask.shape, dtype=np.uint8)
             self._history_tmp = np.zeros(mask.shape, dtype=np.uint16)
 
         if self.preallocate:
-            # np.uint16 carpan sart: NumPy 2'de uint8 * python int sonucu uint8
-            # kalir ve 255*240 tasar. Tipi acikca yukseltiyoruz.
-            np.multiply(self._history, np.uint16(HISTORY_DECAY), out=self._history_tmp)
+            # dtype=np.uint16 is required: without it the multiplication can be
+            # evaluated in uint8 and 255*240 overflows before it ever reaches the
+            # uint16 output buffer. The rule differs between NumPy 1.x and 2.x,
+            # so the accumulator type is stated explicitly.
+            np.multiply(self._history, HISTORY_DECAY, out=self._history_tmp,
+                        dtype=np.uint16)
             np.right_shift(self._history_tmp, 8, out=self._history_tmp)
             np.maximum(self._history_tmp, mask, out=self._history_tmp)
             np.copyto(self._history, self._history_tmp, casting="unsafe")
@@ -101,13 +110,13 @@ class Pipeline:
             self._history = np.maximum(decayed, mask).astype(np.uint8)
 
     def process(self, frame):
-        """Tek kareyi isler. (output_bgr, stats) doner. Sureler milisaniye."""
+        """Processes one frame. Returns (output_bgr, stats). Times in milliseconds."""
         t_start = time.perf_counter()
         self.detections = []
 
         work = frame
 
-        # ---- on isleme ----
+        # ---- preprocessing ----
         if USE_GRAYSCALE and len(frame.shape) == 3:
             self._gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY, dst=self._dst(self._gray))
             work = self._gray
@@ -130,7 +139,7 @@ class Pipeline:
 
         t_preprocess = time.perf_counter()
 
-        # ---- tespit ----
+        # ---- detection ----
         if USE_MOTION_DETECT:
             self._mask = self.bg_sub.apply(work, self._dst(self._mask))
             mask = self._mask
@@ -139,6 +148,13 @@ class Pipeline:
                 mask = cv2.morphologyEx(
                     mask, cv2.MORPH_OPEN, self.morph_kernel, dst=self._dst(mask)
                 )
+                # Rebinding, not copying: the C++ side runs morphologyEx in place
+                # and the motion-history stage below reads the morphed mask. If
+                # this line were missing, the trail would be built from the raw
+                # MOG2 output here and from the opened mask there - two different
+                # images, silently.
+                self._mask = mask
+
                 contours, _ = cv2.findContours(
                     mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                 )
@@ -151,8 +167,8 @@ class Pipeline:
 
         t_detect = time.perf_counter()
 
-        # ---- hareket izi ----
-        # Isinma bitmeden guncellenmiyor: C++ tarafiyla ayni kosul.
+        # ---- motion history ----
+        # Not updated before warm-up ends: same condition as the C++ side.
         history_active = (
             self.motion_history
             and USE_MOTION_DETECT
@@ -164,8 +180,8 @@ class Pipeline:
 
         t_history = time.perf_counter()
 
-        # ---- cikti goruntusu ----
-        if self.motion_history and self._history is not None:
+        # ---- output image ----
+        if self.motion_history and USE_MOTION_DETECT and self._history is not None:
             output = cv2.cvtColor(self._history, cv2.COLOR_GRAY2BGR,
                                   dst=self._dst(self._output))
         elif edges is not None:
@@ -193,7 +209,7 @@ class Pipeline:
 
 
 def percentile(values, p):
-    """C++ tarafindaki lineer interpolasyonlu yuzdelikle ayni hesap."""
+    """Same linearly interpolated percentile as the C++ side."""
     if not values:
         return 0.0
     ordered = sorted(values)
@@ -205,7 +221,7 @@ def percentile(values, p):
 
 
 def run_bench(video_path, max_frames, warmup_frames, json_out, preallocate=False,
-              motion_history=False):
+              motion_history=False, history_out=""):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"error: cannot open video: {video_path}", file=sys.stderr)
@@ -251,6 +267,17 @@ def run_bench(video_path, max_frames, warmup_frames, json_out, preallocate=False
             file=sys.stderr,
         )
         return 1
+
+    # The trail image after the last frame, written losslessly so the harness can
+    # compare it against the C++ one pixel by pixel.
+    if history_out:
+        if pipeline.motion_history_image() is None:
+            print("error: --dump-history requires --history and a video long "
+                  "enough to leave warm-up", file=sys.stderr)
+            return 1
+        if not cv2.imwrite(history_out, pipeline.motion_history_image()):
+            print(f"error: cannot write history image to {history_out}", file=sys.stderr)
+            return 1
 
     mean_total = statistics.fmean(total_ms)
     result = {
@@ -302,10 +329,13 @@ def main():
                         help="reuse output buffers via dst= (mimics the C++ side)")
     parser.add_argument("--history", action="store_true",
                         help="enable the hand-written motion-history stage")
+    parser.add_argument("--dump-history", dest="history_out", default="",
+                        help="write the final motion-history image (PNG)")
     args = parser.parse_args()
 
     return run_bench(args.bench, args.frames, args.warmup, args.json_out,
-                     preallocate=args.preallocate, motion_history=args.history)
+                     preallocate=args.preallocate, motion_history=args.history,
+                     history_out=args.history_out)
 
 
 if __name__ == "__main__":
