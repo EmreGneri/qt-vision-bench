@@ -1,5 +1,5 @@
-# Satir sonlarini sabitle. Onemli olan .sh dosyalari: CRLF ile checkout
-# edilirlerse bash "\r: command not found" verip durur.
+# Pin line endings. The .sh files are the ones that matter: checked out with
+# CRLF, bash stops with "\r: command not found".
 * text=auto
 
 *.sh   text eol=lf

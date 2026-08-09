@@ -1,18 +1,21 @@
-# derleme ciktilari
+# build output
 build/
+build-*/
 *.exe
 *.obj
 *.a
 
-# uretilen test verisi - depoda tutulmaz, betikle yeniden uretilir
+# generated test data - not stored in the repository, regenerate with the scripts
 bench/*.mp4
 bench/result_cpp.json
 bench/result_python.json
+bench/history_*.png
 
 # python
 __pycache__/
 *.pyc
 
-# editor
+# editor / tooling
 .vscode/
 .idea/
+compile_commands.json
