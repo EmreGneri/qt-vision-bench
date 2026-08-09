@@ -6,6 +6,8 @@ on:
   pull_request:
 
 jobs:
+  # The platform the project is developed on, and the toolchain the benchmark
+  # numbers in the README were produced with.
   windows-msys2:
     runs-on: windows-latest
 
@@ -30,12 +32,48 @@ jobs:
             mingw-w64-ucrt-x86_64-opencv
 
       - name: Configure
-        run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DQVB_WERROR=ON
 
       - name: Build
         run: cmake --build build
 
-      # Testler arayuz gerektirmiyor: isleme hatti Qt'den bagimsiz oldugu icin
-      # basliksiz CI makinesinde de kosuyor.
+      # The tests need no display: the pipeline is free of Qt, so it runs on a
+      # headless CI machine too.
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # Second platform, second OpenCV major version. The pipeline compiles against
+  # both 4.x and 5.x, and this job is what keeps that true.
+  linux-gcc:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build qt6-base-dev libopencv-dev
+
+      - name: Configure
+        run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DQVB_WERROR=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # Formatting is a machine's job, not a reviewer's.
+  format:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: pipx install clang-format==22.1.8
+
+      - name: Check formatting
+        run: clang-format --dry-run --Werror src/*.cpp src/*.h tests/*.cpp
