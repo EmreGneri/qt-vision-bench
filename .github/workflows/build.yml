@@ -1,0 +1,41 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows-msys2:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-qt6-base
+            mingw-w64-ucrt-x86_64-qt6-tools
+            mingw-w64-ucrt-x86_64-opencv
+
+      - name: Configure
+        run: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      # Testler arayuz gerektirmiyor: isleme hatti Qt'den bagimsiz oldugu icin
+      # basliksiz CI makinesinde de kosuyor.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

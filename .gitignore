@@ -1,0 +1,18 @@
+# derleme ciktilari
+build/
+*.exe
+*.obj
+*.a
+
+# uretilen test verisi - depoda tutulmaz, betikle yeniden uretilir
+bench/test_video.mp4
+bench/result_cpp.json
+bench/result_python.json
+
+# python
+__pycache__/
+*.pyc
+
+# editor
+.vscode/
+.idea/

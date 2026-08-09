@@ -1,0 +1,9 @@
+# Satir sonlarini sabitle. Onemli olan .sh dosyalari: CRLF ile checkout
+# edilirlerse bash "\r: command not found" verip durur.
+* text=auto
+
+*.sh   text eol=lf
+*.ps1  text eol=crlf
+
+*.png  binary
+*.mp4  binary
