@@ -5,7 +5,7 @@ build/
 *.a
 
 # uretilen test verisi - depoda tutulmaz, betikle yeniden uretilir
-bench/test_video.mp4
+bench/*.mp4
 bench/result_cpp.json
 bench/result_python.json
 

@@ -40,9 +40,15 @@ DEFAULT_BENCH_WARMUP = 10    # olcume girmeyen kare sayisi
 
 
 class Pipeline:
-    """src/pipeline.h icindeki Pipeline sinifinin Python esdegeri."""
+    """src/pipeline.h icindeki Pipeline sinifinin Python esdegeri.
 
-    def __init__(self):
+    preallocate=True verilirse her OpenCV cagrisina `dst=` ile ayni tampon
+    gecilir, yani C++ tarafinin uye cv::Mat'leri yeniden kullanmasi taklit
+    edilir. Bu, "fark yorumlayicidan mi yoksa kare basina NumPy tahsisinden mi
+    geliyor" sorusunu olcerek ayirmak icin var.
+    """
+
+    def __init__(self, preallocate=False):
         # detectShadows=False: C++ tarafi da golge tespitini kapatiyor
         self.bg_sub = cv2.createBackgroundSubtractorMOG2(
             history=MOG2_HISTORY,
@@ -53,6 +59,19 @@ class Pipeline:
         self.frames_since_reset = 0
         self.detections = []
 
+        self.preallocate = preallocate
+        # Yeniden kullanilan tamponlar. preallocate kapaliyken hep None kalir,
+        # yani OpenCV her cagrida yeni dizi ayirir.
+        self._gray = None
+        self._blurred = None
+        self._edges = None
+        self._mask = None
+        self._output = None
+
+    def _dst(self, buffer):
+        """preallocate acikken tamponu, kapaliyken None doner."""
+        return buffer if self.preallocate else None
+
     def process(self, frame):
         """Tek kareyi isler. (output_bgr, stats) doner. Sureler milisaniye."""
         t_start = time.perf_counter()
@@ -62,26 +81,36 @@ class Pipeline:
 
         # ---- on isleme ----
         if USE_GRAYSCALE and len(frame.shape) == 3:
-            work = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            self._gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY, dst=self._dst(self._gray))
+            work = self._gray
 
         if USE_BLUR:
-            work = cv2.GaussianBlur(work, (BLUR_KERNEL, BLUR_KERNEL), 0)
+            self._blurred = cv2.GaussianBlur(
+                work, (BLUR_KERNEL, BLUR_KERNEL), 0, dst=self._dst(self._blurred)
+            )
+            work = self._blurred
 
         edges = None
         if USE_CANNY:
             canny_input = work
             if len(work.shape) == 3:
                 canny_input = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(canny_input, CANNY_LOW, CANNY_HIGH)
+            self._edges = cv2.Canny(
+                canny_input, CANNY_LOW, CANNY_HIGH, edges=self._dst(self._edges)
+            )
+            edges = self._edges
 
         t_preprocess = time.perf_counter()
 
         # ---- tespit ----
         if USE_MOTION_DETECT:
-            mask = self.bg_sub.apply(work)
+            self._mask = self.bg_sub.apply(work, self._dst(self._mask))
+            mask = self._mask
 
             if self.frames_since_reset >= PIPELINE_WARMUP_FRAMES:
-                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.morph_kernel)
+                mask = cv2.morphologyEx(
+                    mask, cv2.MORPH_OPEN, self.morph_kernel, dst=self._dst(mask)
+                )
                 contours, _ = cv2.findContours(
                     mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                 )
@@ -96,11 +125,12 @@ class Pipeline:
 
         # ---- cikti goruntusu ----
         if edges is not None:
-            output = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+            output = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR, dst=self._dst(self._output))
         elif len(work.shape) == 2:
-            output = cv2.cvtColor(work, cv2.COLOR_GRAY2BGR)
+            output = cv2.cvtColor(work, cv2.COLOR_GRAY2BGR, dst=self._dst(self._output))
         else:
             output = work.copy()
+        self._output = output
 
         if DRAW_BOXES:
             for (x, y, w, h) in self.detections:
@@ -129,13 +159,13 @@ def percentile(values, p):
     return ordered[lo] * (1.0 - frac) + ordered[hi] * frac
 
 
-def run_bench(video_path, max_frames, warmup_frames, json_out):
+def run_bench(video_path, max_frames, warmup_frames, json_out, preallocate=False):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"error: cannot open video: {video_path}", file=sys.stderr)
         return 1
 
-    pipeline = Pipeline()
+    pipeline = Pipeline(preallocate=preallocate)
     total_ms, pre_ms, det_ms = [], [], []
     detections_total = 0
     seen = 0
@@ -177,7 +207,8 @@ def run_bench(video_path, max_frames, warmup_frames, json_out):
 
     mean_total = statistics.fmean(total_ms)
     result = {
-        "implementation": "python",
+        "implementation": "python-prealloc" if preallocate else "python",
+        "preallocate": preallocate,
         "video": video_path,
         "resolution": f"{width}x{height}",
         "frames_measured": measured,
@@ -218,9 +249,12 @@ def main():
     parser.add_argument("--frames", type=int, default=0, help="0 = whole video")
     parser.add_argument("--warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--json", dest="json_out", default="")
+    parser.add_argument("--preallocate", action="store_true",
+                        help="reuse output buffers via dst= (mimics the C++ side)")
     args = parser.parse_args()
 
-    return run_bench(args.bench, args.frames, args.warmup, args.json_out)
+    return run_bench(args.bench, args.frames, args.warmup, args.json_out,
+                     preallocate=args.preallocate)
 
 
 if __name__ == "__main__":

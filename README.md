@@ -14,60 +14,90 @@ project answers that question properly: the same pipeline, implemented twice,
 measured on the same frames, with a correctness check proving both versions do
 the same work.
 
-The interesting part is not "C++ is faster." It is *how much*, *where*, and
-*why* — and being able to defend the measurement.
+The answer was not the one I expected, and the investigation is the point of
+the repository.
 
 ## Results
 
-Measured on an Intel Core i7-13620H, Windows 11, Release build (`-O3`),
-640x480 synthetic video, 290 measured frames after 10 warm-up frames:
+Intel Core i7-13620H, Windows 11, Release build (`-O3`), 150-frame synthetic
+videos, 10 warm-up frames, median of 5 runs per cell.
 
-| Metric | C++ / Qt | Python | C++ advantage |
-|---|---:|---:|---:|
-| Mean frame time (ms) | 1.378 | 1.634 | 1.19x |
-| Median frame time (ms) | 1.350 | 1.640 | 1.21x |
-| p95 frame time (ms) | 1.715 | 1.822 | 1.06x |
-| Preprocess mean (ms) | 0.128 | 0.214 | 1.67x |
-| Detection mean (ms) | 1.190 | 1.278 | 1.07x |
-| Processing throughput (fps) | 725.9 | 612.0 | 1.19x |
-| End-to-end throughput (fps) | 609.7 | 409.4 | 1.49x |
-| Detections found | 680 | 680 | parity check |
+| Resolution | C++ (ms) | Python (ms) | Python prealloc (ms) | C++ vs Python | C++ vs prealloc |
+|---|---:|---:|---:|---:|---:|
+| 480p | 1.324 | 1.561 | 1.484 | 1.18x | 1.12x |
+| 720p | 3.788 | 4.526 | 3.953 | 1.19x | 1.04x |
+| 1080p | 10.162 | 10.915 | 9.605 | 1.07x | **0.95x** |
 
-Reproduce with `py bench/compare.py`; the numbers above are the contents of
-[`bench/results.md`](bench/results.md).
+![Benchmark across resolutions](bench/sweep.png)
 
-### Reading the numbers honestly
+"Python prealloc" is the same Python file with one change: every OpenCV call
+receives a reused output buffer through `dst=`, mimicking what the C++ version
+does with member `cv::Mat` objects. All three variants find the identical
+number of detections at every resolution, and the harness refuses to report
+results if they ever disagree.
 
-**The gap is modest, and that is the expected result.** Both implementations
-call the same native OpenCV kernels. `cv2.GaussianBlur` is not "Python code" —
-it is the same C++ routine reached through a binding. What C++ actually saves
-is the per-call overhead around those kernels: interpreter dispatch, argument
-marshalling, and NumPy array allocation for every intermediate image.
+The headline: **against a straightforward Python translation, C++ wins by
+1.07x-1.19x. Against Python that manages its buffers the way the C++ code does,
+the advantage nearly vanishes — and at 1080p it reverses.**
 
-That explains the shape of the table:
+### Where the time actually goes
 
-- **Preprocess is 1.67x faster** — several cheap kernels back to back, so
-  per-call overhead dominates. This is also where the C++ version reuses
-  preallocated `cv::Mat` buffers instead of allocating a new array per frame.
-- **Detection is only 1.07x faster** — one expensive MOG2 call dominates the
-  step, and that cost is identical on both sides.
-- **End-to-end is 1.49x faster** — the per-frame Python overhead in the capture
-  loop is added on top of the processing gap.
+| Resolution | Stage | C++ | Python | Python prealloc |
+|---|---|---:|---:|---:|
+| 480p | preprocess | 0.144 | 0.194 | 0.161 |
+| 480p | detection | 1.119 | 1.300 | 1.268 |
+| 720p | preprocess | 0.260 | 0.371 | 0.270 |
+| 720p | detection | 3.420 | 3.753 | 3.571 |
+| 1080p | preprocess | **0.517** | **1.308** | **0.503** |
+| 1080p | detection | 9.472 | 9.160 | 8.853 |
 
-A benchmark that showed C++ ten times faster here would mean the measurement
-was rigged, not that the port was good.
+Two separate effects were hiding inside the single "C++ is faster" number.
 
-### Known limitations
+**Effect 1 — allocation, not language.** At 1080p the preprocessing stage takes
+1.308 ms in plain Python and 0.517 ms in C++, a 2.5x gap that grows with
+resolution. Preallocating the output buffers drops Python to 0.503 ms, matching
+C++ to within measurement noise. The gap was never interpreter speed: it was one
+fresh NumPy array per intermediate image per frame, a cost that scales with pixel
+count. The same fix in a Python codebase costs three lines and no rewrite.
 
-- **The two sides use different OpenCV major versions.** C++ links OpenCV 5.0.0
-  (from MSYS2); the Python side runs `opencv-python` 4.13.0, the newest wheel
-  available. Kernel-level improvements between the versions are therefore mixed
-  into the comparison. Matching the versions is the first thing I would fix
-  before quoting these numbers as final.
-- Single machine, single resolution, single scene. The harness makes it cheap
-  to widen this, but it has not been done yet.
-- Timing covers the processing pipeline only; video decode is excluded from
-  `process_ms` and included in `end_to_end_fps`.
+**Effect 2 — the library build, not the language either.** In the detection
+stage, which is dominated by a single MOG2 call, Python is *faster* at 1080p
+(9.160 ms vs 9.472 ms). That call is native code on both sides — but not the
+same native code:
+
+| | C++ side | Python side |
+|---|---|---|
+| OpenCV | 5.0.0 (MSYS2 package) | 4.13.0 (`opencv-python` wheel) |
+| Intel IPP | **not compiled in** | **2022.2.0** |
+| Parallel framework | TBB 2023.1 | Concurrency (ConcRT) |
+| Baseline arch flags | `-march=nocona` (2004-era x86-64) | vendor wheel defaults |
+| Compiler | gcc 16.1.0 | MSVC (wheel) |
+
+The MSYS2 package targets a conservative CPU baseline and ships without Intel's
+Performance Primitives; the official `opencv-python` wheel bundles IPP 2022.2.0.
+On small frames the per-call Python overhead hides this. On 1080p frames the
+IPP-accelerated kernel wins outright, in a stage where the programming language
+should be irrelevant.
+
+### What I take from this
+
+> For a pipeline that is mostly orchestration of OpenCV kernels, the language
+> is close to irrelevant. What mattered was memory management (fixable in
+> Python) and library build configuration (not a language property at all). The
+> honest speedup from the C++ port is ~1.1x against careful Python, not the
+> order of magnitude the framing usually implies.
+
+That does not make the C++ version pointless — it has no interpreter runtime to
+deploy, no GIL, and predictable latency — but those are the arguments that
+survive measurement, and the throughput argument is not.
+
+It also means the original Python internship tool was leaving roughly 15% on
+the table for want of three lines, which is a considerably more useful finding
+than "rewrite it in C++".
+
+Reproduce with `py bench/sweep.py --repeat 5`; raw measurements land in
+[`bench/sweep.json`](bench/sweep.json), tables in
+[`bench/sweep.md`](bench/sweep.md).
 
 ## What the pipeline does
 
@@ -90,8 +120,9 @@ watching them work.
 | `src/mainwindow.h/.cpp` | UI, controls, live statistics. |
 | `src/main.cpp` | Entry point, argument parsing, headless benchmark mode. |
 | `tests/test_pipeline.cpp` | Unit tests, no framework dependency. |
-| `bench/baseline.py` | The same pipeline in Python. |
-| `bench/compare.py` | Runs both, checks parity, writes the results table. |
+| `bench/baseline.py` | The same pipeline in Python, with and without buffer reuse. |
+| `bench/compare.py` | Quick single-resolution run with a parity check. |
+| `bench/sweep.py` | All three variants across resolutions; tables and chart. |
 
 Three decisions worth explaining:
 
@@ -145,22 +176,35 @@ From an MSYS2 UCRT64 shell the executable also runs directly:
 ## Reproducing the benchmark
 
 ```powershell
-py bench/make_test_video.py
-py bench/compare.py
+py bench/make_test_video.py     # 480p sample for the single-resolution run
+py bench/compare.py             # one resolution, quick
+py bench/sweep.py --repeat 5    # all variants and resolutions, tables and chart
 ```
 
-The test video is synthetic and generated from a fixed seed, so anyone cloning
-this repository measures the same frames, the same motion, and the same noise.
-A recorded clip would have made the numbers machine-dependent.
+The test videos are synthetic and generated from a fixed seed, so anyone cloning
+this repository measures the same frames, the same motion, and the same noise. A
+recorded clip would have made the numbers machine-dependent for no benefit.
 
-`compare.py` fails with a non-zero exit code if the two implementations disagree
-on the number of detections — a speed comparison between two pipelines that are
-not doing the same work is worthless.
+Both harness scripts exit non-zero if the implementations disagree on the number
+of detections. A speed comparison between pipelines that are not doing the same
+work is worthless, so the parity check gates the result rather than sitting in a
+footnote.
+
+## Limitations
+
+- **The two sides link different OpenCV builds**, as analysed above. Until they
+  are built from source with matching flags, the detection-stage numbers
+  describe packaging, not language.
+- Single machine, single scene, three resolutions.
+- Timing covers the processing pipeline only; video decode is excluded from
+  `process_ms` and included in `end_to_end_fps`.
+- The GUI has no recording or export function; it is an inspection tool.
 
 ## Next steps
 
-- Match OpenCV versions across both implementations.
-- Sweep resolutions (480p / 720p / 1080p) and plot frame time against pixel count.
-- Add an ONNX detector stage via `cv::dnn` as an optional comparison. Note that
-  this would likely show *no* C++ advantage, since inference is the same native
-  code on both sides — which is itself a result worth publishing.
+- Build both sides against one OpenCV compiled from source with identical flags,
+  then re-run the sweep. This is the only way to isolate the language.
+- Add a stage that is not a thin OpenCV wrapper — custom per-pixel logic, where
+  the language difference should be large — and measure whether it is.
+- Add an ONNX detector via `cv::dnn`. Based on the findings here it would likely
+  show no language advantage at all, which is itself worth publishing.

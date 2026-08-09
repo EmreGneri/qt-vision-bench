@@ -16,6 +16,18 @@
 
 namespace {
 
+// Derleyici adi: olcumun hangi derleyici ve hangi bayraklarla alindigi
+// sonucun parcasi. Farkli derleyicide sayilar degisir.
+#if defined(__clang__)
+constexpr const char* kCompilerName = "clang " __clang_version__;
+#elif defined(__GNUC__)
+constexpr const char* kCompilerName = "gcc " __VERSION__;
+#elif defined(_MSC_VER)
+constexpr const char* kCompilerName = "msvc";
+#else
+constexpr const char* kCompilerName = "unknown";
+#endif
+
 struct BenchOptions {
     std::string videoPath;
     int maxFrames = 0;     // 0 = videonun tamami
@@ -139,7 +151,11 @@ int runBench(const BenchOptions& opt) {
         "  \"processing_fps\": %.2f,\n"
         "  \"end_to_end_fps\": %.2f,\n"
         "  \"wall_seconds\": %.4f,\n"
-        "  \"detections_total\": %lld\n"
+        "  \"detections_total\": %lld,\n"
+        // Surum bilgisi ciktida durmali: Python tarafi farkli bir OpenCV
+        // surumu kullaniyorsa karsilastirmayi okuyan bunu gorebilmeli.
+        "  \"opencv_version\": \"%s\",\n"
+        "  \"compiler\": \"%s\"\n"
         "}\n",
         opt.videoPath.c_str(), width, height, measured, opt.warmupFrames,
         meanTotal, percentile(totalMs, 50.0), percentile(totalMs, 95.0),
@@ -148,7 +164,7 @@ int runBench(const BenchOptions& opt) {
         mean(preMs), mean(detMs),
         (meanTotal > 0.0) ? (1000.0 / meanTotal) : 0.0,
         (wallSeconds > 0.0) ? (static_cast<double>(measured) / wallSeconds) : 0.0,
-        wallSeconds, detections);
+        wallSeconds, detections, CV_VERSION, kCompilerName);
 
     if (written < 0 || written >= static_cast<int>(sizeof(buffer))) {
         std::fprintf(stderr, "error: JSON output truncated\n");
