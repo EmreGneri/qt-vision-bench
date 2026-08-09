@@ -8,29 +8,8 @@
 
 namespace {
 
-// FPS ortalamasinda yeni olcumun agirligi. Dusuk deger = daha durgun sayi.
+// Weight of the newest sample in the FPS average. Lower means a steadier number.
 constexpr double kFpsSmoothing = 0.15;
-
-// cv::Mat BGR -> QImage RGB888.
-// .copy() sart: QImage asagidaki gecici cv::Mat'in tamponunu sarmalar, o mat
-// fonksiyondan cikinca serbest kalir. Derin kopya olmadan arayuz cop veri gosterir.
-QImage matToQImage(const cv::Mat& mat) {
-    if (mat.empty()) {
-        return QImage();
-    }
-
-    cv::Mat rgb;
-    switch (mat.channels()) {
-        case 1: cv::cvtColor(mat, rgb, cv::COLOR_GRAY2RGB); break;
-        case 3: cv::cvtColor(mat, rgb, cv::COLOR_BGR2RGB);  break;
-        case 4: cv::cvtColor(mat, rgb, cv::COLOR_BGRA2RGB); break;
-        default: return QImage();
-    }
-
-    return QImage(rgb.data, rgb.cols, rgb.rows,
-                  static_cast<int>(rgb.step), QImage::Format_RGB888)
-        .copy();
-}
 
 QElapsedTimer& monotonicTimer() {
     static QElapsedTimer timer;
@@ -42,10 +21,30 @@ QElapsedTimer& monotonicTimer() {
 
 }  // namespace
 
+// .copy() is required: the QImage below wraps the buffer's pixels, and that
+// buffer is reused on the next frame. Without a deep copy the UI would show
+// whatever the next conversion writes over it.
+QImage VideoWorker::matToQImage(const cv::Mat& mat, cv::Mat& buffer) {
+    if (mat.empty()) {
+        return QImage();
+    }
+
+    switch (mat.channels()) {
+        case 1: cv::cvtColor(mat, buffer, cv::COLOR_GRAY2RGB); break;
+        case 3: cv::cvtColor(mat, buffer, cv::COLOR_BGR2RGB); break;
+        case 4: cv::cvtColor(mat, buffer, cv::COLOR_BGRA2RGB); break;
+        default: return QImage();
+    }
+
+    return QImage(buffer.data, buffer.cols, buffer.rows, static_cast<int>(buffer.step),
+                  QImage::Format_RGB888)
+        .copy();
+}
+
 VideoWorker::VideoWorker(QObject* parent) : QObject(parent) {
     timer_ = new QTimer(this);
-    // 0 aralik: olay dongusu bosaldiginda hemen tetiklenir. Dosya kaynaginda
-    // "olabildigince hizli" demek, kamera kaynaginda read() zaten bekletiyor.
+    // Interval 0: fires as soon as the event loop is idle. On a file source that
+    // means "as fast as possible"; on a camera, read() already paces us.
     timer_->setInterval(0);
     timer_->setTimerType(Qt::PreciseTimer);
     connect(timer_, &QTimer::timeout, this, &VideoWorker::grabFrame);
@@ -58,7 +57,8 @@ VideoWorker::~VideoWorker() {
 }
 
 void VideoWorker::restartTimer() {
-    const int interval = (maxFps_ > 0) ? (1000 / maxFps_) : 0;
+    // Rounded, not truncated: 1000/240 would truncate to 4 ms, i.e. 250 FPS.
+    const int interval = (maxFps_ > 0) ? static_cast<int>(1000.0 / maxFps_ + 0.5) : 0;
     timer_->setInterval(interval);
     if (cap_.isOpened() && !timer_->isActive()) {
         timer_->start();
@@ -70,20 +70,26 @@ void VideoWorker::emitOpened(const QString& description) {
     const int height = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
     const double fps = cap_.get(cv::CAP_PROP_FPS);
 
-    pipeline_.reset();  // yeni kaynak = yeni arka plan modeli
+    pipeline_.reset();  // new source means a new background model
     smoothedFps_ = 0.0;
     lastFrameNs_ = 0;
 
     emit sourceOpened(description, width, height, fps);
-    timer_->start();
+    timer_->start();  // the interval is already set by the last setMaxFps()
 }
 
 void VideoWorker::openCamera(int index) {
     stop();
 
-    // CAP_DSHOW: Windows'ta varsayilan MSMF arka ucu bazi kameralarda
-    // acilista 3-5 saniye takiliyor, DirectShow aninda aciliyor.
-    if (!cap_.open(index, cv::CAP_DSHOW)) {
+#ifdef _WIN32
+    // CAP_DSHOW: on Windows the default MSMF backend stalls for 3-5 seconds on
+    // some cameras, DirectShow opens immediately.
+    const bool opened = cap_.open(index, cv::CAP_DSHOW);
+#else
+    const bool opened = cap_.open(index);
+#endif
+
+    if (!opened) {
         emit errorOccurred(
             QStringLiteral("Cannot open camera %1.\nAnother application may be "
                            "using it, or no camera exists at this index.")
@@ -91,7 +97,7 @@ void VideoWorker::openCamera(int index) {
         return;
     }
 
-    emitOpened(QStringLiteral("Kamera %1").arg(index));
+    emitOpened(QStringLiteral("camera %1").arg(index));
 }
 
 void VideoWorker::openFile(const QString& path) {
@@ -137,27 +143,28 @@ void VideoWorker::grabFrame() {
     }
 
     if (!cap_.read(frame_) || frame_.empty()) {
-        // Dosya bitti ya da kamera koptu; ikisi de normal sonlanma sayilir.
+        // End of file, or the camera dropped out; both count as a normal end.
         stop();
         return;
     }
 
     const FrameStats stats = pipeline_.process(frame_, processed_);
 
-    // Gercek FPS: islem suresi degil, kareler arasi duvar saati farki.
-    // Kaynak beklemesi ve arayuz maliyeti dahil, yani kullanicinin gordugu sayi.
+    // Real FPS: wall-clock distance between frames, not processing time. Source
+    // waits and UI cost are included, so it is the number the user experiences.
     const qint64 nowNs = monotonicTimer().nsecsElapsed();
     if (lastFrameNs_ > 0) {
         const double deltaSec = static_cast<double>(nowNs - lastFrameNs_) / 1e9;
         if (deltaSec > 0.0) {
             const double instantFps = 1.0 / deltaSec;
-            smoothedFps_ = (smoothedFps_ <= 0.0)
-                               ? instantFps
-                               : (kFpsSmoothing * instantFps +
-                                  (1.0 - kFpsSmoothing) * smoothedFps_);
+            smoothedFps_ =
+                (smoothedFps_ <= 0.0)
+                    ? instantFps
+                    : (kFpsSmoothing * instantFps + (1.0 - kFpsSmoothing) * smoothedFps_);
         }
     }
     lastFrameNs_ = nowNs;
 
-    emit frameReady(matToQImage(frame_), matToQImage(processed_), stats, smoothedFps_);
+    emit frameReady(matToQImage(frame_, rgbOriginal_),
+                    matToQImage(processed_, rgbProcessed_), stats, smoothedFps_);
 }

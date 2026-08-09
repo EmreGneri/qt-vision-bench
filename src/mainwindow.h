@@ -20,17 +20,17 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
-    // Komut satirindan --video ile verilen dosyayi acar. Gosterim ve demo
-    // kaydi icin: uygulama acilir acilmaz isleme baslasin.
+    // Opens the file passed with --video. For demos and screen recordings:
+    // processing starts the moment the window appears.
     void openVideo(const QString& path);
 
-    // --history bayragi arayuz modunda da gecerli olsun diye. Kutuyu isaretlemek
-    // zaten onControlsChanged'i tetikliyor, ayrica ayar gondermeye gerek yok.
+    // Makes the --history flag apply to GUI mode too. Ticking the box already
+    // triggers onControlsChanged(), so no separate config push is needed.
     void setMotionHistoryEnabled(bool enabled);
 
 signals:
-    // Bu sinyaller isci ipligindeki VideoWorker slotlarina bagli. Iplikler
-    // farkli oldugu icin Qt baglantiyi otomatik olarak kuyruklu yapar.
+    // These are connected to VideoWorker slots living on the worker thread.
+    // Because the threads differ, Qt makes the connections queued automatically.
     void requestCamera(int index);
     void requestFile(const QString& path);
     void requestStop();
@@ -46,9 +46,10 @@ private slots:
     void onOpenFile();
     void onStop();
     void onControlsChanged();
-    void onFrameReady(const QImage& original, const QImage& processed,
-                      FrameStats stats, double fps);
-    void onSourceOpened(const QString& description, int width, int height, double sourceFps);
+    void onFrameReady(const QImage& original, const QImage& processed, FrameStats stats,
+                      double fps);
+    void onSourceOpened(const QString& description, int width, int height,
+                        double sourceFps);
     void onSourceClosed();
     void onError(const QString& message);
 
@@ -57,23 +58,23 @@ private:
     PipelineConfig currentConfig() const;
     void updateImageLabels();
 
-    // --- isci iplik ---
+    // --- worker thread ---
     QThread* thread_ = nullptr;
     VideoWorker* worker_ = nullptr;
 
-    // --- goruntu alanlari ---
+    // --- image areas ---
     QLabel* originalLabel_ = nullptr;
     QLabel* processedLabel_ = nullptr;
     QImage lastOriginal_;
     QImage lastProcessed_;
 
-    // --- kaynak kontrolleri ---
+    // --- source controls ---
     QSpinBox* cameraIndexSpin_ = nullptr;
     QPushButton* startCameraButton_ = nullptr;
     QPushButton* openFileButton_ = nullptr;
     QPushButton* stopButton_ = nullptr;
 
-    // --- hat kontrolleri ---
+    // --- pipeline controls ---
     QCheckBox* grayscaleCheck_ = nullptr;
     QCheckBox* blurCheck_ = nullptr;
     QCheckBox* cannyCheck_ = nullptr;
@@ -88,7 +89,7 @@ private:
     QSpinBox* minAreaSpin_ = nullptr;
     QSpinBox* maxFpsSpin_ = nullptr;
 
-    // --- durum cubugu ---
+    // --- status bar ---
     QLabel* fpsStatus_ = nullptr;
     QLabel* timingStatus_ = nullptr;
     QLabel* detectionStatus_ = nullptr;

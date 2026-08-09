@@ -22,16 +22,16 @@
 
 namespace {
 
-// Kontrol panelinin sabit genisligi. Splitter'in solundaki goruntu alani
-// kalan tum yeri aliyor.
+// Fixed width of the control panel. The splitter to its left takes whatever
+// space is left over.
 constexpr int kPanelWidth = 260;
 
 QLabel* makeVideoLabel(const QString& placeholder) {
     auto* label = new QLabel(placeholder);
     label->setAlignment(Qt::AlignCenter);
     label->setMinimumSize(240, 180);
-    // Ignored: etiket, icindeki pixmap'in boyutunu layout'a dayatmasin.
-    // Aksi halde buyuk kare geldiginde pencere kendi kendine buyur.
+    // Ignored: keeps the label from imposing its pixmap's size on the layout.
+    // Otherwise a large frame would grow the window by itself.
     label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     label->setStyleSheet(QStringLiteral("background-color: #202020; color: #909090;"));
     return label;
@@ -42,7 +42,7 @@ QLabel* makeVideoLabel(const QString& placeholder) {
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowTitle(QStringLiteral("Qt Vision Bench - C++ / OpenCV"));
 
-    // ---- merkezi alan: iki goruntu + kontrol paneli ----
+    // ---- central area: two views plus the control panel ----
     originalLabel_ = makeVideoLabel(QStringLiteral("Source\n(no input)"));
     processedLabel_ = makeVideoLabel(QStringLiteral("Processed\n(no input)"));
 
@@ -58,7 +58,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     centralLayout->addWidget(buildControlPanel(), /*stretch=*/0);
     setCentralWidget(central);
 
-    // ---- durum cubugu ----
+    // ---- status bar ----
     fpsStatus_ = new QLabel(QStringLiteral("FPS: -"));
     timingStatus_ = new QLabel(QStringLiteral("frame: - ms"));
     detectionStatus_ = new QLabel(QStringLiteral("detections: -"));
@@ -68,9 +68,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     statusBar()->addPermanentWidget(timingStatus_);
     statusBar()->addPermanentWidget(fpsStatus_);
 
-    // ---- isci iplik ----
-    // worker_ bilerek parent'siz olusturuluyor: parent'i olan bir QObject
-    // moveToThread ile tasinamaz.
+    // ---- worker thread ----
+    // worker_ is deliberately created without a parent: a QObject that has one
+    // cannot be moved to another thread.
     thread_ = new QThread(this);
     worker_ = new VideoWorker;
     worker_->moveToThread(thread_);
@@ -89,16 +89,21 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     thread_->start();
 
-    // Arayuzdeki varsayilan degerleri isciye gonder ki iki taraf ayni ayarla baslasin
+    // Push the UI defaults to the worker so both sides start from one config
     onControlsChanged();
 
     resize(1100, 680);
 }
 
 MainWindow::~MainWindow() {
-    if (thread_) {
-        // Blocking: yakalama durmadan iplik kapatilirsa VideoCapture yarim kalir.
-        QMetaObject::invokeMethod(worker_, "stop", Qt::BlockingQueuedConnection);
+    if (thread_ && thread_->isRunning()) {
+        // Blocking on purpose: shutting the thread down while capture is still
+        // running would leave the VideoCapture half torn down. A lambda rather
+        // than the "stop" string, so a renamed slot fails to compile instead of
+        // failing at runtime.
+        QMetaObject::invokeMethod(
+            worker_, [worker = worker_] { worker->stop(); },
+            Qt::BlockingQueuedConnection);
         thread_->quit();
         thread_->wait();
     }
@@ -109,7 +114,7 @@ QWidget* MainWindow::buildControlPanel() {
     panel->setFixedWidth(kPanelWidth);
     auto* layout = new QVBoxLayout(panel);
 
-    // ---- kaynak ----
+    // ---- source ----
     auto* sourceBox = new QGroupBox(QStringLiteral("Source"));
     auto* sourceLayout = new QVBoxLayout(sourceBox);
 
@@ -129,7 +134,7 @@ QWidget* MainWindow::buildControlPanel() {
     sourceLayout->addWidget(stopButton_);
     layout->addWidget(sourceBox);
 
-    // ---- hat adimlari ----
+    // ---- pipeline stages ----
     auto* stagesBox = new QGroupBox(QStringLiteral("Pipeline stages"));
     auto* stagesLayout = new QVBoxLayout(stagesBox);
     grayscaleCheck_ = new QCheckBox(QStringLiteral("Grayscale"));
@@ -157,7 +162,7 @@ QWidget* MainWindow::buildControlPanel() {
     }
     layout->addWidget(stagesBox);
 
-    // ---- parametreler ----
+    // ---- parameters ----
     auto* paramsBox = new QGroupBox(QStringLiteral("Parameters"));
     auto* paramsLayout = new QFormLayout(paramsBox);
 
@@ -193,16 +198,20 @@ QWidget* MainWindow::buildControlPanel() {
     maxFpsSpin_ = new QSpinBox;
     maxFpsSpin_->setRange(0, 240);
     maxFpsSpin_->setValue(0);
-    // 0 = throttle yok. Dosya kaynaginda "olabildigince hizli" demek, olcum modu.
+    // 0 = no throttle. On a file source that means "as fast as possible", which
+    // is the measurement mode.
     maxFpsSpin_->setSpecialValueText(QStringLiteral("unlimited"));
     paramsLayout->addRow(QStringLiteral("Max FPS"), maxFpsSpin_);
 
     layout->addWidget(paramsBox);
     layout->addStretch(1);
 
-    connect(blurKernelSlider_, &QSlider::valueChanged, this, &MainWindow::onControlsChanged);
-    connect(cannyLowSlider_, &QSlider::valueChanged, this, &MainWindow::onControlsChanged);
-    connect(cannyHighSlider_, &QSlider::valueChanged, this, &MainWindow::onControlsChanged);
+    connect(blurKernelSlider_, &QSlider::valueChanged, this,
+            &MainWindow::onControlsChanged);
+    connect(cannyLowSlider_, &QSlider::valueChanged, this,
+            &MainWindow::onControlsChanged);
+    connect(cannyHighSlider_, &QSlider::valueChanged, this,
+            &MainWindow::onControlsChanged);
     connect(minAreaSpin_, &QSpinBox::valueChanged, this, &MainWindow::onControlsChanged);
     connect(maxFpsSpin_, &QSpinBox::valueChanged, this, &MainWindow::onControlsChanged);
 
@@ -272,7 +281,7 @@ void MainWindow::onFrameReady(const QImage& original, const QImage& processed,
     updateImageLabels();
 
     fpsStatus_->setText(QStringLiteral("FPS: %1").arg(fps, 0, 'f', 1));
-    // Hareket izi kapaliyken sifir yazmanin anlami yok, alani da bosuna isgal eder
+    // Printing a zero while the trail is off says nothing and wastes the space
     const QString historyPart =
         (stats.historyMs > 0.0)
             ? QStringLiteral(" / hist %1").arg(stats.historyMs, 0, 'f', 2)
@@ -321,8 +330,8 @@ void MainWindow::updateImageLabels() {
 
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
-    // Pencere buyudugunde son kareyi yeni boyuta gore olceklendir; yoksa
-    // yeni kare gelene kadar kucuk goruntu ortada asili kalir.
+    // Rescale the last frame to the new size; without this the old, smaller
+    // image hangs in the middle until the next frame arrives.
     updateImageLabels();
 }
 
