@@ -6,71 +6,78 @@
 #include <vector>
 
 // ============================================================================
-// AYARLAR (arayuzden de degistirilebilir, varsayilanlar burada)
+// Tunable parameters. The UI edits a copy of this struct and hands it to the
+// worker thread; the defaults below are what the benchmark measures.
 // ============================================================================
 struct PipelineConfig {
-    bool   useGrayscale     = true;   // renk bilgisi hareket tespitinde gerekmiyor, atinca hizlaniyor
-    bool   useBlur          = true;   // sensor gurultusunu bastirir, sahte konturlari azaltir
-    int    blurKernel       = 5;      // tek sayi olmali; process() icinde zorlaniyor
-    bool   useCanny         = false;  // kenar goruntusu; tespitten bagimsiz, sadece gorsel cikti
-    double cannyLow         = 50.0;
-    double cannyHigh        = 150.0;
-    bool   useMotionDetect  = true;   // MOG2 arka plan cikarma + kontur
-    int    minContourArea   = 500;    // bu alanin altindaki hareket gurultu sayilir
-    double mog2VarThreshold = 16.0;   // OpenCV varsayilani
-    int    mog2History      = 500;    // arka plan modelinin hafiza uzunlugu (kare)
-    bool   drawBoxes        = true;   // tespit kutularini ciktiya ciz
+    bool useGrayscale = true;  // colour is irrelevant to motion; dropping it is faster
+    bool useBlur = true;       // suppresses the sensor noise that becomes false contours
+    int blurKernel = 5;        // must be odd; process() enforces that
+    bool useCanny = false;     // edge view only, independent of detection
+    double cannyLow = 50.0;
+    double cannyHigh = 150.0;
+    bool useMotionDetect = true;     // MOG2 background subtraction + contours
+    int minContourArea = 500;        // motion smaller than this is treated as noise
+    double mog2VarThreshold = 16.0;  // OpenCV default
+    int mog2History = 500;           // length of the background model's memory, in frames
+    bool drawBoxes = true;           // draw detection boxes into the output image
 
-    // reset() sonrasi ilk karelerde MOG2'nin modeli bos: tum kare "hareket"
-    // gorunur ve ekrani saran sahte bir kutu cizilir. Bu kadar kare boyunca
-    // model beslenir ama tespit bildirilmez.
-    int    warmupFrames     = 5;
+    // Right after reset() the MOG2 model is empty, so the whole frame reads as
+    // foreground and a bounding box is drawn around the entire image. For this
+    // many frames the model is fed but no detection is reported.
+    int warmupFrames = 5;
 
-    // Hareket izi: her karede eski iz sonumlenir ve yeni maskeyle birlestirilir,
-    // boylece son saniyelerdeki hareketin yolu goruntude kaliyor.
+    // Motion history trail: every frame decays the previous trail and merges the
+    // current mask into it, so the path of the last few seconds stays visible.
     //
-    // Bu adimin tek bir OpenCV cagrisi karsiligi yok; el yazimi piksel dongusu.
-    // Karsilastirmada bilerek var: hattin geri kalani kutuphane cagrilarindan
-    // ibaret oldugu icin dil farkini gostermiyordu.
-    bool   useMotionHistory = false;
-    int    historyDecay     = 240;  // (deger * decay) >> 8, yani ~0.94 sonum
+    // This stage has no single OpenCV equivalent; it is a hand-written per-pixel
+    // loop. It exists in the comparison on purpose: the rest of the pipeline is
+    // nothing but library calls, which says very little about the language.
+    bool useMotionHistory = false;
+    int historyDecay = 240;  // (value * decay) >> 8, i.e. ~0.94 decay per frame
 };
 
-// Tek bir karenin islenme suresi. Milisaniye cinsinden, steady_clock ile olculur.
+// Per-frame timings in milliseconds, measured with steady_clock.
 struct FrameStats {
-    double totalMs      = 0.0;
-    double preprocessMs = 0.0;  // gri tonlama + bulanik + kenar
-    double detectMs     = 0.0;  // arka plan cikarma + kontur + filtre
-    double historyMs    = 0.0;  // hareket izi (kapaliysa 0)
-    int    detections   = 0;
+    double totalMs = 0.0;
+    double preprocessMs = 0.0;  // grayscale + blur + edges
+    double detectMs = 0.0;      // background subtraction + contours + area filter
+    double historyMs = 0.0;     // motion history trail (0 when the stage is off)
+    int detections = 0;
 };
 
 // ============================================================================
 // Pipeline
 //
-// Tasarim notu: ara matrisler (gray_, blurred_ ...) uye degisken olarak
-// tutuluyor. Boylece her karede yeniden bellek ayrilmiyor; OpenCV ayni tamponu
-// yeniden kullaniyor. Python tarafinda bu kontrol yok, olcumdeki farkin bir
-// kismi tam olarak buradan geliyor.
+// Design note: the intermediate matrices (gray_, blurred_, ...) are members, so
+// no memory is allocated per frame - OpenCV writes into the same buffers every
+// time. The Python side has no such control by default, and a large part of the
+// measured gap comes from exactly that. bench/baseline.py --preallocate isolates
+// it by passing dst= buffers into every call.
 // ============================================================================
 class Pipeline {
 public:
     explicit Pipeline(const PipelineConfig& cfg = PipelineConfig{});
 
+    // Copying would silently share the MOG2 model between two pipelines that
+    // then diverge. Nothing needs it, so it is not allowed.
+    Pipeline(const Pipeline&) = delete;
+    Pipeline& operator=(const Pipeline&) = delete;
+
     void setConfig(const PipelineConfig& cfg);
     const PipelineConfig& config() const { return cfg_; }
 
-    // Arka plan modelini sifirlar. Kaynak degistiginde cagrilmali, yoksa
-    // onceki videonun arka plani yeni karelerde sahte hareket uretir.
+    // Rebuilds the background model. Must be called when the source changes,
+    // otherwise the previous video's background produces phantom motion.
     void reset();
 
-    // input: BGR veya tek kanal. output: her zaman BGR (cizime uygun).
-    // Bos girdi guvenli: bos cikti ve sifir istatistik doner.
+    // input: BGR or single channel. output: always BGR, ready to draw on.
+    // An empty input is safe: empty output, zeroed stats.
     FrameStats process(const cv::Mat& input, cv::Mat& output);
 
     const std::vector<cv::Rect>& lastDetections() const { return detections_; }
 
-    // Hareket izi goruntusu (CV_8UC1). Adim kapaliysa bos.
+    // Motion history image (CV_8UC1). Empty while the stage is off.
     const cv::Mat& motionHistory() const { return motionHistory_; }
 
 private:
@@ -82,10 +89,10 @@ private:
     std::vector<cv::Rect> detections_;
     int framesSinceReset_ = 0;
 
-    // yeniden kullanilan ara tamponlar
+    // reused intermediate buffers
     cv::Mat gray_, blurred_, edges_, mask_, morphKernel_, motionHistory_;
 };
 
-// Cift sayi veya sifir gelirse GaussianBlur patlar; disaridan gelen degeri
-// tek sayiya ve alt sinira zorlar. Arayuzdeki slider da bunu kullaniyor.
+// GaussianBlur throws on an even or zero kernel size; this clamps whatever comes
+// from outside to an odd value at or above 1. The UI slider goes through it too.
 int sanitizeOddKernel(int k);

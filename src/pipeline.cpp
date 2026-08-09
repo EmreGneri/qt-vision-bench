@@ -2,9 +2,9 @@
 
 #include <opencv2/imgproc.hpp>
 
-// OpenCV 5'te sekil analizi fonksiyonlari (contourArea, boundingRect) imgproc'tan
-// ayrilip ayri bir "geometry" modulune tasindi. 4.x'te ayni isimler imgproc icinde.
-// Bu koruma sayesinde kod iki surumde de derleniyor.
+// OpenCV 5 moved the shape-analysis functions (contourArea, boundingRect) out of
+// imgproc into a separate "geometry" module. In 4.x the same names live in
+// imgproc. This guard keeps the file compiling against both.
 #if CV_VERSION_MAJOR >= 5
 #include <opencv2/geometry.hpp>
 #endif
@@ -13,8 +13,8 @@
 
 namespace {
 
-// steady_clock kullaniliyor: system_clock saat ayari degisirse geriye
-// gidebilir, olcumde negatif sure uretir.
+// steady_clock, not system_clock: a clock adjustment can move system_clock
+// backwards and produce negative durations.
 using Clock = std::chrono::steady_clock;
 
 double msSince(const Clock::time_point& start) {
@@ -28,28 +28,29 @@ int sanitizeOddKernel(int k) {
     if (k < 1) {
         return 1;
     }
-    // GaussianBlur cift cekirdek kabul etmez; bir buyuge yuvarla
+    // GaussianBlur rejects even kernels; round up to the next odd size
     return (k % 2 == 0) ? k + 1 : k;
 }
 
 Pipeline::Pipeline(const PipelineConfig& cfg) : cfg_(cfg) {
-    // 3x3 eliptik cekirdek: maskedeki tek piksellik gurultuyu temizlemek icin
-    // yeterli, daha buyugu gercek kucuk nesneleri de siliyor.
+    cfg_.blurKernel = sanitizeOddKernel(cfg_.blurKernel);
+    // 3x3 elliptical kernel: enough to clear single-pixel noise from the mask,
+    // anything larger also erases genuinely small objects.
     morphKernel_ = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
     ensureBackgroundSubtractor();
 }
 
 void Pipeline::ensureBackgroundSubtractor() {
-    // detectShadows=false: golge tespiti kareyi ~%20 yavaslatiyor ve hareket
-    // kutulari icin bir faydasi yok.
-    bgSub_ = cv::createBackgroundSubtractorMOG2(
-        cfg_.mog2History, cfg_.mog2VarThreshold, /*detectShadows=*/false);
+    // detectShadows=false: shadow detection costs roughly 20% per frame and adds
+    // nothing to bounding boxes around motion.
+    bgSub_ = cv::createBackgroundSubtractorMOG2(cfg_.mog2History, cfg_.mog2VarThreshold,
+                                                /*detectShadows=*/false);
     framesSinceReset_ = 0;
 }
 
 void Pipeline::setConfig(const PipelineConfig& cfg) {
-    // MOG2 parametreleri nesne olusturulurken sabitleniyor; sadece bunlar
-    // degistiyse arka plan modelini bastan kur.
+    // MOG2 fixes its parameters at construction time, so the model only has to
+    // be rebuilt when one of those two values actually changed.
     const bool bgParamsChanged = (cfg.mog2History != cfg_.mog2History) ||
                                  (cfg.mog2VarThreshold != cfg_.mog2VarThreshold);
     cfg_ = cfg;
@@ -65,14 +66,15 @@ void Pipeline::reset() {
     motionHistory_.release();
 }
 
-// Tek gecisli sonum + birlestirme.
+// Single-pass decay and merge.
 //
-// Yaptigi is: history[p] = max((history[p] * decay) >> 8, mask[p])
+// What it computes: history[p] = max((history[p] * decay) >> 8, mask[p])
 //
-// Bu adim karsilastirmada bilerek el yazimi: NumPy ayni sonucu uretmek icin
-// once carpma, sonra kaydirma, sonra maksimum, sonra tip donusumu olmak uzere
-// goruntu uzerinde birkac kez gecmek zorunda. Buradaki dongu hepsini tek
-// geciste, ara tampon olmadan yapiyor. Farkin dilden geldigi yer burasi.
+// This stage is hand-written on purpose. To produce the same result NumPy has to
+// traverse the image several times - multiply, shift, maximum, write back - and
+// each traversal is a separate pass over every pixel. The loop below does all of
+// it in one pass with no temporary image. This is where the language difference
+// actually shows up; see the Part 2 table in README.md.
 void Pipeline::updateMotionHistory(const cv::Mat& mask) {
     if (motionHistory_.size() != mask.size() || motionHistory_.type() != CV_8UC1) {
         motionHistory_ = cv::Mat::zeros(mask.size(), CV_8UC1);
@@ -104,9 +106,9 @@ FrameStats Pipeline::process(const cv::Mat& input, cv::Mat& output) {
 
     const auto tStart = Clock::now();
 
-    // ---- On isleme -------------------------------------------------------
-    // work: tespit ve kenar adimlarinin girdisi. Kopyalama yapmamak icin
-    // referans; hangi tampona baktigi adim adim degisiyor.
+    // ---- preprocessing ---------------------------------------------------
+    // work: the input of the detection and edge stages. A pointer rather than a
+    // copy; which buffer it refers to changes from stage to stage.
     const cv::Mat* work = &input;
 
     if (cfg_.useGrayscale && input.channels() == 3) {
@@ -119,14 +121,14 @@ FrameStats Pipeline::process(const cv::Mat& input, cv::Mat& output) {
 
     if (cfg_.useBlur) {
         const int k = sanitizeOddKernel(cfg_.blurKernel);
-        // sigma=0: OpenCV cekirdek boyutundan hesaplar, ayri parametre gerekmez
+        // sigma=0: OpenCV derives it from the kernel size, no extra parameter
         cv::GaussianBlur(*work, blurred_, cv::Size(k, k), 0);
         work = &blurred_;
     }
 
     const bool wantEdges = cfg_.useCanny;
     if (wantEdges) {
-        // Canny tek kanal ister; gri tonlama kapaliysa burada zorunlu olarak yap
+        // Canny needs a single channel; convert here if grayscale is disabled
         if (work->channels() != 1) {
             cv::cvtColor(*work, gray_, cv::COLOR_BGR2GRAY);
             cv::Canny(gray_, edges_, cfg_.cannyLow, cfg_.cannyHigh);
@@ -137,16 +139,22 @@ FrameStats Pipeline::process(const cv::Mat& input, cv::Mat& output) {
 
     stats.preprocessMs = msSince(tStart);
 
-    // ---- Tespit ----------------------------------------------------------
+    // ---- detection -------------------------------------------------------
     const auto tDetect = Clock::now();
 
     if (cfg_.useMotionDetect) {
-        // apply() isinma sirasinda da cagrilmali: model ancak beslenerek oturuyor.
+        // apply() must run during warm-up as well: the model only settles by
+        // being fed frames.
         bgSub_->apply(*work, mask_);
 
         if (framesSinceReset_ >= cfg_.warmupFrames) {
-            // Acma (erode+dilate): tek piksellik parazitleri siler, gercek
-            // bloklari buyutmez. Kapama yerine acma, cunku sorun fazlalik.
+            // Opening (erode + dilate) removes single-pixel speckle without
+            // growing the real blobs. Opening rather than closing, because the
+            // problem here is surplus, not holes.
+            //
+            // In place: the motion-history stage below consumes the same buffer,
+            // and bench/baseline.py does the same so both sides feed the trail
+            // from an identical mask.
             cv::morphologyEx(mask_, mask_, cv::MORPH_OPEN, morphKernel_);
 
             std::vector<std::vector<cv::Point>> contours;
@@ -167,9 +175,9 @@ FrameStats Pipeline::process(const cv::Mat& input, cv::Mat& output) {
     stats.detectMs = msSince(tDetect);
     stats.detections = static_cast<int>(detections_.size());
 
-    // ---- Hareket izi -----------------------------------------------------
-    // Isinma bitmeden guncellenmiyor: o sirada maske tum kareyi hareket
-    // gosterdigi icin iz basta bembeyaz olurdu.
+    // ---- motion history --------------------------------------------------
+    // Not updated before warm-up ends: the mask marks the whole frame as motion
+    // at that point, which would start the trail fully white.
     const bool historyActive = cfg_.useMotionHistory && cfg_.useMotionDetect &&
                                (framesSinceReset_ > cfg_.warmupFrames) && !mask_.empty();
     if (historyActive) {
@@ -178,10 +186,10 @@ FrameStats Pipeline::process(const cv::Mat& input, cv::Mat& output) {
         stats.historyMs = msSince(tHistory);
     }
 
-    // ---- Cikti goruntusu -------------------------------------------------
-    // Olcumun disinda tutulmadi: arayuzun gosterdigi kare bu, maliyeti de
-    // rapora dahil olmali. Python tarafi da ayni isi yapiyor.
-    if (cfg_.useMotionHistory && !motionHistory_.empty()) {
+    // ---- output image ----------------------------------------------------
+    // Deliberately inside the measured region: this is the frame the UI shows,
+    // so its cost belongs in the report. The Python side does the same work.
+    if (cfg_.useMotionHistory && cfg_.useMotionDetect && !motionHistory_.empty()) {
         cv::cvtColor(motionHistory_, output, cv::COLOR_GRAY2BGR);
     } else if (wantEdges) {
         cv::cvtColor(edges_, output, cv::COLOR_GRAY2BGR);
