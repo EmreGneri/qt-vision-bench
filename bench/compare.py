@@ -1,15 +1,17 @@
-"""C++ ve Python uygulamalarini ayni video uzerinde kosturur, sonucu tablolar.
+"""Runs the C++ and Python implementations on one video and tabulates the result.
 
-Iki cikti uretir:
-    bench/results.json  - ham olcumler
-    bench/results.md    - README'ye yapistirilabilir markdown tablo
+Produces two files:
+    bench/results.json  - raw measurements
+    bench/results.md    - a markdown table ready to paste into the README
 
-Kullanim (PowerShell):
+Usage (PowerShell):
     py bench/compare.py
     py bench/compare.py --video bench/test_video.mp4 --frames 500
+    py bench/compare.py --history
 
-Not: C++ ikilisi Qt ve OpenCV DLL'lerine ihtiyac duyuyor. Bu betik MSYS2'nin
-bin klasorunu PATH'e kendisi ekliyor, boylece duz PowerShell'den de calisiyor.
+Note: the C++ binary needs the Qt and OpenCV DLLs. This script prepends the
+MSYS2 bin directory to PATH itself, so it also works from plain PowerShell. Set
+the QVB_DLL_DIR environment variable if MSYS2 lives somewhere else.
 """
 
 import argparse
@@ -18,8 +20,9 @@ import os
 import subprocess
 import sys
 
-# ==== AYARLAR (buradan degistir) ====
-MSYS2_BIN = r"C:\msys64\ucrt64\bin"          # Qt/OpenCV DLL'lerinin yeri
+# ==== SETTINGS ====
+# Where the Qt/OpenCV DLLs live. Override with QVB_DLL_DIR.
+DEFAULT_DLL_DIR = r"C:\msys64\ucrt64\bin"
 DEFAULT_EXE = os.path.join("build", "qt_vision_bench.exe")
 DEFAULT_VIDEO = os.path.join("bench", "test_video.mp4")
 DEFAULT_WARMUP = 10
@@ -28,15 +31,16 @@ RESULTS_MD = os.path.join("bench", "results.md")
 
 
 def environment_with_dlls():
-    """MSYS2 bin klasorunu PATH'in basina ekleyen bir ortam sozlugu doner."""
+    """Returns an environment dict with the DLL directory ahead of PATH."""
     env = os.environ.copy()
-    if os.path.isdir(MSYS2_BIN):
-        env["PATH"] = MSYS2_BIN + os.pathsep + env.get("PATH", "")
+    dll_dir = env.get("QVB_DLL_DIR", DEFAULT_DLL_DIR)
+    if os.path.isdir(dll_dir):
+        env["PATH"] = dll_dir + os.pathsep + env.get("PATH", "")
     return env
 
 
 def run_json_command(command, env=None):
-    """Komutu calistirir, stdout'taki JSON'u sozluk olarak doner."""
+    """Runs a command and returns the JSON on its stdout as a dict."""
     try:
         completed = subprocess.run(
             command,
@@ -47,14 +51,15 @@ def run_json_command(command, env=None):
             check=False,
         )
     except FileNotFoundError:
-        print(f"HATA: komut bulunamadi: {command[0]}", file=sys.stderr)
+        print(f"error: command not found: {command[0]}", file=sys.stderr)
         return None
     except subprocess.TimeoutExpired:
-        print(f"HATA: komut 600 sn icinde bitmedi: {' '.join(command)}", file=sys.stderr)
+        print(f"error: command did not finish within 600 s: {' '.join(command)}",
+              file=sys.stderr)
         return None
 
     if completed.returncode != 0:
-        print(f"HATA: komut basarisiz ({completed.returncode}): {' '.join(command)}",
+        print(f"error: command failed ({completed.returncode}): {' '.join(command)}",
               file=sys.stderr)
         print(completed.stderr.strip(), file=sys.stderr)
         return None
@@ -62,21 +67,64 @@ def run_json_command(command, env=None):
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        print(f"HATA: cikti JSON degil: {exc}", file=sys.stderr)
+        print(f"error: output is not JSON: {exc}", file=sys.stderr)
         print(completed.stdout[:500], file=sys.stderr)
         return None
+
+
+def check_release_build(cpp_result):
+    """A Debug binary would make every number here meaningless."""
+    build_type = cpp_result.get("build_type", "")
+    if build_type == "Release":
+        return True
+    print(
+        f"error: the C++ binary reports build_type={build_type!r}; a timing "
+        "comparison is only meaningful against an optimised build.\n"
+        "Rebuild with: cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release",
+        file=sys.stderr,
+    )
+    return False
+
+
+def images_are_identical(path_a, path_b):
+    """Pixel-exact comparison of two motion-history dumps.
+
+    Returns (identical, message). Reported rather than assumed: the two sides
+    link different OpenCV builds, so equality is a measurement, not a given.
+    """
+    import cv2  # imported here so the module stays usable without the dump
+    import numpy as np
+
+    left = cv2.imread(path_a, cv2.IMREAD_GRAYSCALE)
+    right = cv2.imread(path_b, cv2.IMREAD_GRAYSCALE)
+    if left is None or right is None:
+        return False, "history image missing"
+    if left.shape != right.shape:
+        return False, f"shape mismatch {left.shape} vs {right.shape}"
+
+    diff = np.abs(left.astype(np.int32) - right.astype(np.int32))
+    differing = int((diff > 0).sum())
+    if differing == 0:
+        return True, f"identical over {left.size:,} pixels"
+    return False, (f"{differing:,}/{left.size:,} pixels differ, "
+                   f"max |delta| = {int(diff.max())}")
 
 
 def format_row(label, cpp_value, py_value, ratio_text):
     return f"| {label} | {cpp_value} | {py_value} | {ratio_text} |"
 
 
-def build_markdown(cpp, py):
-    """Iki sonucu markdown tabloya cevirir."""
+def build_markdown(cpp, py, history):
+    """Turns the two results into a markdown table."""
     speedup_process = py["process_ms_mean"] / cpp["process_ms_mean"]
     speedup_endtoend = cpp["end_to_end_fps"] / py["end_to_end_fps"]
 
+    stage_note = ("with the hand-written motion-history stage"
+                  if history else "library-call pipeline only")
     lines = [
+        f"{cpp['resolution']}, {cpp['frames_measured']} measured frames, "
+        f"{stage_note}.",
+        "",
         "| Metric | C++ / Qt | Python | C++ advantage |",
         "|---|---:|---:|---:|",
         format_row("Mean frame time (ms)",
@@ -121,16 +169,18 @@ def main():
     parser.add_argument("--exe", default=DEFAULT_EXE)
     parser.add_argument("--frames", type=int, default=0, help="0 = whole video")
     parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP)
+    parser.add_argument("--history", action="store_true",
+                        help="enable the hand-written motion-history stage")
     args = parser.parse_args()
 
     if not os.path.isfile(args.video):
-        print(f"HATA: video yok: {args.video}\n"
-              "Once uretin: py bench/make_test_video.py", file=sys.stderr)
+        print(f"error: no such video: {args.video}\n"
+              "Generate it first: py bench/make_test_video.py", file=sys.stderr)
         return 1
 
     if not os.path.isfile(args.exe):
-        print(f"HATA: ikili yok: {args.exe}\n"
-              "Once derleyin: ./scripts/build.sh (MSYS2 UCRT64 kabugunda)",
+        print(f"error: no such binary: {args.exe}\n"
+              "Build it first: ./scripts/build.sh (in an MSYS2 UCRT64 shell)",
               file=sys.stderr)
         return 1
 
@@ -138,28 +188,49 @@ def main():
     if args.frames > 0:
         common += ["--frames", str(args.frames)]
 
-    print("C++ olcumu calisiyor...")
-    cpp = run_json_command([args.exe] + common, env=environment_with_dlls())
+    cpp_history = os.path.join("bench", "history_cpp.png")
+    py_history = os.path.join("bench", "history_python.png")
+    if args.history:
+        common += ["--history"]
+
+    print("running the C++ measurement...")
+    cpp_command = [args.exe] + common
+    if args.history:
+        cpp_command += ["--dump-history", cpp_history]
+    cpp = run_json_command(cpp_command, env=environment_with_dlls())
     if cpp is None:
         return 1
+    if not check_release_build(cpp):
+        return 1
 
-    print("Python olcumu calisiyor...")
-    py_result = run_json_command(
-        [sys.executable, os.path.join("bench", "baseline.py")] + common
-    )
+    print("running the Python measurement...")
+    py_command = [sys.executable, os.path.join("bench", "baseline.py")] + common
+    if args.history:
+        py_command += ["--dump-history", py_history]
+    py_result = run_json_command(py_command)
     if py_result is None:
         return 1
 
-    # Esdegerlik kontrolu: ayni videoda ayni sayida tespit cikmiyorsa iki hat
-    # ayni isi yapmiyor demektir ve hiz karsilastirmasi anlamsizdir.
+    # Equivalence check: different detection counts on the same video mean the
+    # two pipelines are not doing the same work, and the speed comparison is void.
     parity_ok = cpp["detections_total"] == py_result["detections_total"]
 
-    markdown = build_markdown(cpp, py_result)
+    # The detection count says nothing about the motion-history stage, so that
+    # image is compared pixel by pixel when the stage is on.
+    history_parity_ok = None
+    history_message = ""
+    if args.history:
+        history_parity_ok, history_message = images_are_identical(cpp_history, py_history)
+        parity_ok = parity_ok and history_parity_ok
+
+    markdown = build_markdown(cpp, py_result, args.history)
 
     payload = {
         "video": args.video,
         "frames_measured": cpp["frames_measured"],
         "parity_ok": parity_ok,
+        "history_parity_ok": history_parity_ok,
+        "history_parity_detail": history_message,
         "cpp": cpp,
         "python": py_result,
     }
@@ -173,12 +244,18 @@ def main():
     print()
     print(markdown)
     print()
-    if parity_ok:
-        print(f"Parity OK: both implementations found {cpp['detections_total']} detections.")
+    if cpp["detections_total"] == py_result["detections_total"]:
+        print(f"Detection parity OK: both implementations found "
+              f"{cpp['detections_total']} detections.")
     else:
-        print("UYARI: tespit sayilari farkli, iki hat ayni isi yapmiyor. "
-              f"C++={cpp['detections_total']} Python={py_result['detections_total']}",
-              file=sys.stderr)
+        print("error: detection counts differ, the two pipelines are not doing the "
+              f"same work. C++={cpp['detections_total']} "
+              f"Python={py_result['detections_total']}", file=sys.stderr)
+
+    if args.history:
+        label = "OK" if history_parity_ok else "MISMATCH"
+        stream = sys.stdout if history_parity_ok else sys.stderr
+        print(f"Motion-history parity {label}: {history_message}", file=stream)
 
     print(f"\nWritten: {RESULTS_JSON}, {RESULTS_MD}")
     return 0 if parity_ok else 2

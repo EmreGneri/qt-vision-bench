@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# MSYS2 UCRT64 ortamina projenin bagimliliklarini kurar.
+# Installs the project's dependencies into an MSYS2 UCRT64 environment.
 #
-# Kullanim (PowerShell'den):
+# Usage (from PowerShell):
 #   C:\msys64\usr\bin\bash.exe -lc "/c/Users/Emre/projects/qt-vision-bench/scripts/install_deps.sh"
 #
-# Aynalar zaman zaman baglantiyi resetliyor; pacman indirdiklerini onbellekte
-# tuttugu icin tekrar denemek kaldigi yerden devam ediyor.
+# The mirrors reset the connection now and then; pacman caches what it already
+# downloaded, so retrying picks up where it stopped.
 
 set -u
 
@@ -21,22 +21,23 @@ PACKAGES=(
 MAX_ATTEMPTS=10
 
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-  echo "=== DENEME $attempt / $MAX_ATTEMPTS ==="
+  echo "=== ATTEMPT $attempt / $MAX_ATTEMPTS ==="
 
-  # Onceki calismadan kalan kilit dosyasi varsa ve pacman calismiyorsa temizle
+  # Clear a lock file left behind by an earlier run, but only when no pacman
+  # process is actually holding it.
   if [ -f /var/lib/pacman/db.lck ] && ! pgrep -x pacman >/dev/null 2>&1; then
-    echo "kalinti db.lck siliniyor"
+    echo "removing stale db.lck"
     rm -f /var/lib/pacman/db.lck
   fi
 
   if pacman -S --needed --noconfirm --disable-download-timeout "${PACKAGES[@]}"; then
-    echo "KURULUM BASARILI"
+    echo "INSTALL OK"
     exit 0
   fi
 
-  echo "deneme basarisiz, 10 sn sonra tekrar"
+  echo "attempt failed, retrying in 10 s"
   sleep 10
 done
 
-echo "KURULUM BASARISIZ: $MAX_ATTEMPTS deneme sonunda tamamlanamadi"
+echo "INSTALL FAILED: gave up after $MAX_ATTEMPTS attempts"
 exit 1

@@ -1,10 +1,11 @@
-"""Deterministik sentetik test videosu uretir.
+"""Generates a deterministic synthetic test video.
 
-Neden sentetik: karsilastirmanin tekrarlanabilir olmasi gerekiyor. Depoyu
-klonlayan herkes ayni kareleri, ayni hareketi ve ayni gurultuyu alsin diye
-tohum sabit. Gercek kamera kaydiyla olcum makineden makineye kayardi.
+Why synthetic: the comparison has to be reproducible. The seed is fixed so that
+everyone who clones the repository gets the same frames, the same motion and the
+same noise. A real camera recording would make the numbers drift from machine to
+machine for no benefit.
 
-Kullanim (PowerShell):
+Usage (PowerShell):
     py bench/make_test_video.py
     py bench/make_test_video.py --frames 600 --width 1280 --height 720
 """
@@ -16,26 +17,26 @@ import sys
 import cv2
 import numpy as np
 
-# ==== AYARLAR (buradan degistir) ====
+# ==== SETTINGS ====
 DEFAULT_OUTPUT = os.path.join("bench", "test_video.mp4")
 DEFAULT_WIDTH = 640
 DEFAULT_HEIGHT = 480
 DEFAULT_FRAMES = 300
 DEFAULT_FPS = 30
-RANDOM_SEED = 42          # tekrarlanabilirlik icin sabit
-NOISE_SIGMA = 4.0         # kare basina sensor gurultusu; MOG2'nin isi olsun diye
+RANDOM_SEED = 42          # fixed for reproducibility
+NOISE_SIGMA = 4.0         # per-frame sensor noise, to give MOG2 something to do
 
 
 def build_background(width, height, rng):
-    """Sabit arka plan: dikey gradyan + degismeyen doku.
+    """Static background: a vertical gradient plus an unchanging texture.
 
-    Duz gri bir arka plan MOG2 icin fazla kolay olurdu; doku, gercek sahnedeki
-    varyansa yaklastiriyor.
+    A flat grey background would be too easy for MOG2; the texture brings it
+    closer to the variance of a real scene.
     """
     gradient = np.linspace(40, 140, height, dtype=np.float32).reshape(height, 1)
     background = np.repeat(gradient, width, axis=1)
 
-    # Sabit doku: her karede ayni, yani arka planin parcasi
+    # Fixed texture: identical in every frame, so it is part of the background
     texture = rng.normal(0.0, 8.0, size=(height, width)).astype(np.float32)
     background = background + texture
 
@@ -62,17 +63,17 @@ def main():
     writer = cv2.VideoWriter(args.output, fourcc, args.fps, (args.width, args.height))
     if not writer.isOpened():
         print(
-            f"HATA: video yazicisi acilamadi: {args.output}\n"
-            "mp4v kodegi bulunamamis olabilir; --output ile .avi deneyin.",
+            f"error: cannot open the video writer: {args.output}\n"
+            "The mp4v codec may be missing; try an .avi path with --output.",
             file=sys.stderr,
         )
         return 1
 
-    # Hareketli nesneler: (baslangic karesi, x0, y0, genislik, yukseklik, dx, dy, renk)
+    # Moving objects: (first frame, x0, y0, width, height, dx, dy, colour)
     objects = [
         (0, 20, 60, 90, 70, 3.0, 0.8, (255, 255, 255)),
         (0, 400, 300, 60, 60, -2.0, -1.4, (200, 200, 200)),
-        (90, 300, 40, 120, 90, 1.2, 2.2, (240, 240, 240)),  # sonradan sahneye girer
+        (90, 300, 40, 120, 90, 1.2, 2.2, (240, 240, 240)),  # enters later
     ]
 
     for frame_index in range(args.frames):
@@ -82,7 +83,7 @@ def main():
             if frame_index < start:
                 continue
             step = frame_index - start
-            # Kenara gelince sekmesi icin ucgen dalga; nesne kadrajda kaliyor
+            # Triangle wave so objects bounce off the edges and stay in frame
             x = int(x0 + dx * step) % (2 * max(args.width - w, 1))
             y = int(y0 + dy * step) % (2 * max(args.height - h, 1))
             if x > args.width - w:
@@ -91,7 +92,7 @@ def main():
                 y = 2 * (args.height - h) - y
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, cv2.FILLED)
 
-        # Kare basina gurultu: arka plan modelinin ogrenecek varyansi olsun
+        # Per-frame noise, so the background model has a variance to learn
         noise = rng.normal(0.0, NOISE_SIGMA, size=frame.shape)
         frame = np.clip(frame.astype(np.float32) + noise, 0, 255).astype(np.uint8)
 

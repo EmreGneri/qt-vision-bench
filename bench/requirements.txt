@@ -1,2 +1,5 @@
+# baseline.py / make_test_video.py
 opencv-python>=4.8
 numpy>=1.24
+# sweep.py chart output
+matplotlib>=3.7

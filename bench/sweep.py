@@ -1,22 +1,24 @@
-"""Uc uygulamayi coklu cozunurlukte olcer, tablo ve grafik uretir.
+"""Measures three implementations across several resolutions; writes tables and a chart.
 
-Olculen uc varyant:
-    cpp              - C++ / Qt hatti
-    python           - dogrudan cevirisi (her cagri yeni NumPy dizisi ayirir)
-    python-prealloc  - ayni Python kodu, ama OpenCV cagrilarina dst= ile
-                       yeniden kullanilan tampon gecilerek
+The three variants:
+    cpp              - the C++ / Qt pipeline
+    python           - a direct translation (every call allocates a new NumPy array)
+    python-prealloc  - the same Python code, but with reused buffers passed into
+                       every OpenCV call through dst=
 
-Ucuncu varyant bir kontrol grubu: C++ ile Python arasindaki farkin ne kadari
-dilden, ne kadari kare basina bellek tahsisinden geliyor?
+The third variant is the control group: how much of the gap between C++ and
+Python is the language, and how much is one allocation per intermediate image
+per frame?
 
-Uretilen dosyalar:
-    bench/sweep.json  - ham olcumler
-    bench/sweep.md    - markdown tablolar
-    bench/sweep.png   - grafik
+Output files:
+    bench/sweep.json  - raw measurements
+    bench/sweep.md    - markdown tables
+    bench/sweep.png   - chart
 
-Kullanim (PowerShell):
+Usage (PowerShell):
     py bench/sweep.py
     py bench/sweep.py --repeat 5 --frames 300
+    py bench/sweep.py --repeat 5 --history
 """
 
 import argparse
@@ -28,23 +30,28 @@ import sys
 
 import matplotlib
 
-# Agg: pencere acmadan dosyaya cizer. Betik CI'da da kosabilsin diye.
+# Agg: draws to a file without opening a window, so the script also runs in CI.
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402  (backend secimi importtan once olmali)
+import matplotlib.pyplot as plt  # noqa: E402  (backend must be chosen before this)
 
-# compare.py ile ayni yardimcilari kullan - iki yerde ayni kodu tutmanin anlami yok
+# Share compare.py's helpers - no reason to keep two copies of the same code
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compare import environment_with_dlls, run_json_command  # noqa: E402
+from compare import (  # noqa: E402
+    check_release_build,
+    environment_with_dlls,
+    images_are_identical,
+    run_json_command,
+)
 
-# ==== AYARLAR (buradan degistir) ====
+# ==== SETTINGS ====
 RESOLUTIONS = [
     (640, 480, "480p"),
     (1280, 720, "720p"),
     (1920, 1080, "1080p"),
 ]
-DEFAULT_FRAMES = 150      # her cozunurlukte uretilen kare sayisi
+DEFAULT_FRAMES = 150      # frames generated per resolution
 DEFAULT_WARMUP = 10
-DEFAULT_REPEAT = 3        # ayni olcum kac kez tekrarlanir; medyan raporlanir
+DEFAULT_REPEAT = 3        # how often each measurement repeats; the median is reported
 DEFAULT_EXE = os.path.join("build", "qt_vision_bench.exe")
 SWEEP_JSON = os.path.join("bench", "sweep.json")
 SWEEP_MD = os.path.join("bench", "sweep.md")
@@ -59,9 +66,9 @@ SERIES_TITLES = {
 
 
 def generate_video(width, height, frames, path):
-    """make_test_video.py'yi cagirarak o cozunurlukte video uretir."""
+    """Calls make_test_video.py to produce a clip at that resolution."""
     if os.path.isfile(path):
-        print(f"  {path} zaten var, yeniden uretilmiyor")
+        print(f"  {path} already exists, not regenerating")
         return True
 
     command = [
@@ -74,14 +81,14 @@ def generate_video(width, height, frames, path):
     ]
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
-        print(f"HATA: video uretilemedi ({width}x{height})", file=sys.stderr)
+        print(f"error: could not generate the video ({width}x{height})", file=sys.stderr)
         print(completed.stderr.strip(), file=sys.stderr)
         return False
     return True
 
 
 def measure(command, env, repeat, label, name):
-    """Ayni olcumu repeat kez kosar, medyanlari ve yayilimi doner."""
+    """Runs the same measurement `repeat` times, returns medians and spread."""
     runs = []
     for attempt in range(1, repeat + 1):
         print(f"[{label}] {name} {attempt}/{repeat}")
@@ -92,8 +99,8 @@ def measure(command, env, repeat, label, name):
 
     totals = [run["process_ms_mean"] for run in runs]
     return {
-        # Medyan: arka planda calisan baska bir surecin tek seferlik etkisi
-        # ortalamayi bozar, medyani bozmaz.
+        # Median: a one-off spike from some other process on the machine ruins
+        # the mean but not the median.
         "total_ms": statistics.median(totals),
         "total_min": min(totals),
         "total_max": max(totals),
@@ -102,10 +109,11 @@ def measure(command, env, repeat, label, name):
         "hist_ms": statistics.median([run.get("history_ms_mean", 0.0) for run in runs]),
         "detections": runs[0]["detections_total"],
         "runs_ms": totals,
+        "meta": runs[0],
     }
 
 
-def build_markdown(rows, repeat, frames):
+def build_markdown(rows, repeat, frames, history):
     lines = [
         f"Median of {repeat} runs per cell, {frames} frames per run; the range "
         "in parentheses is min-max across runs.",
@@ -128,8 +136,24 @@ def build_markdown(rows, repeat, frames):
             f"{pre['total_ms'] / cpp['total_ms']:.2f}x | {parity} |"
         )
 
+    lines += [
+        "",
+        "Parity is gated, not annotated: the harness exits non-zero if any cell "
+        "disagrees.",
+    ]
+
+    if history:
+        lines += [
+            "",
+            "| Resolution | Motion-history images (C++ vs Python) |",
+            "|---|---|",
+        ]
+        for row in rows:
+            state = "identical" if row["history_parity_ok"] else "MISMATCH"
+            lines.append(f"| {row['label']} | {state} - {row['history_parity_detail']} |")
+
     stages = [("pre_ms", "preprocess"), ("det_ms", "detection")]
-    # Hareket izi adimi kapaliyken satirlari sifirla doldurmanin anlami yok
+    # No point filling rows with zeros while the motion-history stage is off
     if any(row["cpp"]["hist_ms"] > 0.0 for row in rows):
         stages.append(("hist_ms", "motion history"))
 
@@ -148,11 +172,29 @@ def build_markdown(rows, repeat, frames):
                 f"{row['python_prealloc'][stage_key]:.3f} |"
             )
 
+    # The environment is part of the result: the two sides link different OpenCV
+    # builds, and the detection-stage numbers cannot be read without knowing that.
+    cpp_meta = rows[0]["cpp"]["meta"]
+    py_meta = rows[0]["python"]["meta"]
+    lines += [
+        "",
+        "Environment:",
+        "",
+        "| | C++ side | Python side |",
+        "|---|---|---|",
+        f"| OpenCV | {cpp_meta.get('opencv_version', '?')} | "
+        f"{py_meta.get('opencv_version', '?')} |",
+        f"| Toolchain | {cpp_meta.get('compiler', '?')}, "
+        f"{cpp_meta.get('build_type', '?')} | Python "
+        f"{py_meta.get('python_version', '?')}, NumPy "
+        f"{py_meta.get('numpy_version', '?')} |",
+    ]
+
     return "\n".join(lines)
 
 
 def error_bars(rows, series):
-    """Medyanin altindaki ve ustundeki en uc kosuya olan mesafe."""
+    """Distance from the median to the slowest and fastest run."""
     lower = [row[series]["total_ms"] - row[series]["total_min"] for row in rows]
     upper = [row[series]["total_max"] - row[series]["total_ms"] for row in rows]
     return [lower, upper]
@@ -182,7 +224,7 @@ def draw_chart(rows, path):
     ax_time.legend(fontsize=8)
     ax_time.grid(axis="y", alpha=0.3)
 
-    # 1.0 cizgisi kritik: altina dusen seri, C++'in geride kaldigi noktadir.
+    # The 1.0 line matters: a series below it is where C++ is the slower one.
     ax_ratio.plot(labels, [row["python"]["total_ms"] / row["cpp"]["total_ms"] for row in rows],
                   marker="o", label="vs Python")
     ax_ratio.plot(labels,
@@ -194,8 +236,8 @@ def draw_chart(rows, path):
     ax_ratio.legend(fontsize=8)
     ax_ratio.grid(alpha=0.3)
 
-    # Ucuncu panel farkin kaynagini izole eder: on isleme adimi tahsis
-    # agirlikli, tampon yeniden kullanimi devreye girince fark kapaniyor.
+    # The third panel isolates where the difference comes from: preprocessing is
+    # allocation-heavy, and the gap closes once the buffers are reused.
     for series in SERIES:
         ax_pre.bar(
             [i + offsets[series] for i in x],
@@ -226,15 +268,15 @@ def main():
                         help="enable the hand-written motion-history stage in all variants")
     args = parser.parse_args()
 
-    # Iki mod ayri dosyalara yazar; biri digerini ezmesin
+    # The two modes write to separate files so neither overwrites the other
     suffix = "_history" if args.history else ""
     out_json = SWEEP_JSON.replace(".json", f"{suffix}.json")
     out_md = SWEEP_MD.replace(".md", f"{suffix}.md")
     out_png = SWEEP_PNG.replace(".png", f"{suffix}.png")
 
     if not os.path.isfile(args.exe):
-        print(f"HATA: ikili yok: {args.exe}\n"
-              "Once derleyin: ./scripts/build.sh (MSYS2 UCRT64 kabugunda)",
+        print(f"error: no such binary: {args.exe}\n"
+              "Build it first: ./scripts/build.sh (in an MSYS2 UCRT64 shell)",
               file=sys.stderr)
         return 1
 
@@ -244,7 +286,7 @@ def main():
 
     for width, height, label in RESOLUTIONS:
         video = os.path.join("bench", f"test_video_{label}.mp4")
-        print(f"[{label}] video hazirlaniyor...")
+        print(f"[{label}] preparing the video...")
         if not generate_video(width, height, args.frames, video):
             return 1
 
@@ -258,6 +300,16 @@ def main():
             "python_prealloc": [sys.executable, baseline] + common + ["--preallocate"],
         }
 
+        # The trail is dumped from the last of the repeated runs; every run over
+        # the same deterministic video produces the same image.
+        history_paths = {}
+        if args.history:
+            for series in SERIES:
+                history_paths[series] = os.path.join(
+                    "bench", f"history_{series}_{label}.png")
+                commands[series] = commands[series] + [
+                    "--dump-history", history_paths[series]]
+
         row = {"label": label, "pixels": width * height}
         for series in SERIES:
             result = measure(commands[series], env, args.repeat, label,
@@ -266,13 +318,32 @@ def main():
                 return 1
             row[series] = result
 
-        # Esdegerlik: uc varyant da ayni sayida tespit bulmali. Bulmuyorsa
-        # ayni isi yapmiyorlar ve hiz karsilastirmasi anlamsiz.
+        if not check_release_build(row["cpp"]["meta"]):
+            return 1
+
+        # Equivalence: all three variants must find the same number of
+        # detections. If they do not, they are not doing the same work and the
+        # speed comparison means nothing.
         detection_counts = {row[series]["detections"] for series in SERIES}
         row["parity_ok"] = len(detection_counts) == 1
+
+        # Detection counts say nothing about the hand-written stage, so its
+        # output image is compared pixel by pixel as well.
+        row["history_parity_ok"] = None
+        row["history_parity_detail"] = ""
+        if args.history:
+            checks = [
+                images_are_identical(history_paths["cpp"], history_paths["python"]),
+                images_are_identical(history_paths["cpp"],
+                                     history_paths["python_prealloc"]),
+            ]
+            row["history_parity_ok"] = all(ok for ok, _ in checks)
+            row["history_parity_detail"] = "; ".join(detail for _, detail in checks)
+            row["parity_ok"] = row["parity_ok"] and row["history_parity_ok"]
+
         rows.append(row)
 
-    markdown = build_markdown(rows, args.repeat, args.frames)
+    markdown = build_markdown(rows, args.repeat, args.frames, args.history)
     draw_chart(rows, out_png)
 
     with open(out_json, "w", encoding="utf-8") as handle:
@@ -288,7 +359,7 @@ def main():
 
     mismatches = [row["label"] for row in rows if not row["parity_ok"]]
     if mismatches:
-        print(f"UYARI: tespit sayilari uyusmuyor: {', '.join(mismatches)}",
+        print(f"error: parity check failed at: {', '.join(mismatches)}",
               file=sys.stderr)
         return 2
     return 0

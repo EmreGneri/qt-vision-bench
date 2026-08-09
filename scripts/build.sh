@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Yapilandir + derle + testleri kos.
+# Configure + build + run the tests.
 #
-# Kullanim (MSYS2 UCRT64 kabugunda):
+# Usage (in an MSYS2 UCRT64 shell):
 #   ./scripts/build.sh              # Release
 #   ./scripts/build.sh Debug        # Debug
 #
-# PowerShell'den:
+# From PowerShell:
 #   C:\msys64\usr\bin\bash.exe -lc "/c/Users/Emre/projects/qt-vision-bench/scripts/build.sh"
 
 set -euo pipefail
@@ -16,17 +16,19 @@ BUILD_DIR="$PROJECT_DIR/build"
 
 cd "$PROJECT_DIR"
 
-echo "=== CMake yapilandirma ($BUILD_TYPE) ==="
+echo "=== CMake configure ($BUILD_TYPE) ==="
 cmake -G Ninja -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
 
 echo
-echo "=== Derleme ==="
+echo "=== Build ==="
 cmake --build "$BUILD_DIR"
 
 echo
-echo "=== Testler ==="
-cd "$BUILD_DIR"
-ctest --output-on-failure
+echo "=== Tests ==="
+ctest --test-dir "$BUILD_DIR" --output-on-failure
 
 echo
-echo "TAMAM: $BUILD_DIR/qt_vision_bench.exe"
+if [ "$BUILD_TYPE" != "Release" ]; then
+    echo "NOTE: this is a $BUILD_TYPE build; the benchmark scripts only accept Release."
+fi
+echo "DONE: $BUILD_DIR/qt_vision_bench.exe"
