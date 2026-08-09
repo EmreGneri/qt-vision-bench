@@ -1,9 +1,6 @@
-<!--
-After pushing to GitHub, add the CI badge on the line below the title:
-[![build](https://github.com/<user>/qt-vision-bench/actions/workflows/build.yml/badge.svg)](https://github.com/<user>/qt-vision-bench/actions/workflows/build.yml)
--->
-
 # Qt Vision Bench
+
+[![build](https://github.com/EmreGneri/qt-vision-bench/actions/workflows/build.yml/badge.svg)](https://github.com/EmreGneri/qt-vision-bench/actions/workflows/build.yml)
 
 A real-time motion detection tool written in C++/Qt6/OpenCV, together with a
 line-by-line Python reference implementation and a benchmark harness that
