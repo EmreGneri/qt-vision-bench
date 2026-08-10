@@ -8,8 +8,9 @@ measures both on identical input.
 
 ![Application window](docs/screenshot_history.png)
 
-The answer turned out to depend entirely on *what kind of code* you are
-comparing, and that investigation is the point of the repository.
+How much the language itself buys you turns out to depend entirely on *what
+kind of code* you are comparing, and that investigation is the point of the
+repository.
 
 ## Results
 
