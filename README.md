@@ -8,14 +8,6 @@ measures both on identical input.
 
 ![Application window](docs/screenshot_history.png)
 
-## Why this exists
-
-During my internship at Maptech I built a real-time object detection tool in
-Python. It worked, but I never knew what the language was costing me. This
-project answers that question properly: the same pipeline, implemented twice,
-measured on the same frames, with a correctness check proving both versions do
-the same work.
-
 The answer turned out to depend entirely on *what kind of code* you are
 comparing, and that investigation is the point of the repository.
 
